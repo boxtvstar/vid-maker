@@ -1,0 +1,8 @@
+{
+  "name": "VidAI Pro - AI Video Creator",
+  "description": "A comprehensive AI-powered video creation platform that guides users from script to final render with advanced controls for motion, voice, and visual style.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
