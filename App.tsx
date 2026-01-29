@@ -1,10 +1,14 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { CreationStep, ScriptBlock, Scene, Voice } from './types';
 import { INITIAL_SCRIPT_BLOCKS, VOICES, MOTION_STYLES } from './constants';
-import { saveProject, getProjects, getApiKey, setApiKey as saveApiKey, downloadFile, generateSubtitles, ProjectData } from './utils';
+import { saveProject, getProjects, getApiKey, setApiKey as saveApiKey, downloadFile, generateSubtitles, ProjectData, autoSave, loadAutoSave, clearAutoSave, compressImage, apiQueue } from './utils';
 import { VIDEO_TEMPLATES, BGM_OPTIONS, EXPORT_PRESETS } from './templates';
 import { ApiKeyModal, ProjectsModal, TemplatesModal } from './Modals';
+import { ProgressBar } from './ProgressBar';
+import { RecoveryModal } from './RecoveryModal';
+import { ErrorDisplay } from './ErrorDisplay';
+import { LoadingSpinner } from './LoadingSpinner';
 import { generateImage, extractKeywords, imageToDataUrl } from './imageUtils';
 import { generateVideoWithPolling } from './services/videoService';
 import { generateBatchTTS } from './services/ttsService';
@@ -125,6 +129,112 @@ const App: React.FC = () => {
   const [renderError, setRenderError] = useState<string | null>(null);
   
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
+
+  // Auto-save 상태
+  const [lastSaved, setLastSaved] = useState<Date | null>(null);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [hasAutoSave, setHasAutoSave] = useState(false);
+
+  // Scene Preview Sync Refs
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [isPlayingScene, setIsPlayingScene] = useState(false);
+
+  // Sync video and audio playback
+  useEffect(() => {
+    if (isPlayingScene) {
+      videoRef.current?.play().catch(() => setIsPlayingScene(false));
+      audioRef.current?.play().catch(() => {});
+    } else {
+      videoRef.current?.pause();
+      audioRef.current?.pause();
+    }
+  }, [isPlayingScene]);
+
+  // Load auto-save on mount
+  useEffect(() => {
+    const savedData = loadAutoSave();
+    if (savedData) {
+      setHasAutoSave(true);
+      setShowRecoveryModal(true);
+    }
+  }, []);
+
+  // Auto-save effect
+  useEffect(() => {
+    if (step === CreationStep.TOPIC) return; // Don't autosave on initial screen
+
+    const timer = setTimeout(() => {
+      const dataToSave = {
+        step,
+        topic,
+        videoLength,
+        videoTone,
+        scenes,
+        scriptBlocks,
+        selectedVoice,
+        timestamp: new Date().toISOString()
+      };
+      
+      if (autoSave(dataToSave)) {
+        setLastSaved(new Date());
+      }
+    }, 5000); // Save 5 seconds after last change
+
+    return () => clearTimeout(timer);
+  }, [step, topic, videoLength, videoTone, scenes, scriptBlocks, selectedVoice]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl/Cmd + S to save
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        saveProject({
+          id: Date.now().toString(),
+          name: topic || 'Untitled Project',
+          topic,
+          videoLength,
+          videoTone,
+          scriptBlocks,
+          scenes,
+          selectedVoice,
+          selectedMotion: '',
+          selectedBgm: '',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        setLastSaved(new Date());
+        // Show temporary success message
+        console.log('Project saved manually');
+      }
+
+      // Esc to close modals
+      if (e.key === 'Escape') {
+        setShowRecoveryModal(false);
+        setShowProjectsModal(false);
+        setShowApiKeyModal(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [topic, videoLength, videoTone, scriptBlocks, scenes, selectedVoice]);
+
+  const handleRecoverAutoSave = () => {
+    const savedData = loadAutoSave();
+    if (savedData) {
+      setStep(savedData.step);
+      setTopic(savedData.topic);
+      setVideoLength(savedData.videoLength);
+      setVideoTone(savedData.videoTone);
+      setScenes(savedData.scenes);
+      setScriptBlocks(savedData.scriptBlocks);
+      setSelectedVoice(savedData.selectedVoice);
+      setShowRecoveryModal(false);
+    }
+  };
+
 
 
   // 2단계 진입 시 Shot 자동 생성 로직
@@ -992,6 +1102,29 @@ Respond in JSON format:
           {/* Left: Shot List */}
           <div className="border-r border-[#292348] bg-[#1a162e]/50 overflow-y-auto custom-scrollbar">
              <div className="p-4 space-y-2">
+                <button
+                   onClick={handleGenerateMotions}
+                   disabled={isGeneratingVideo}
+                   className={`w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 font-bold text-sm transition-all mb-4 ${
+                     isGeneratingVideo 
+                        ? 'bg-[#292348] text-white/50 cursor-not-allowed'
+                        : scenes.some(s => !s.videoClipUrl)
+                           ? 'bg-gradient-to-r from-primary to-purple-600 text-white shadow-lg hover:shadow-primary/30 hover:scale-[1.02]' 
+                           : 'bg-[#292348] text-white/50 hover:bg-[#3b3267] hover:text-white'
+                   }`}
+                >
+                   {isGeneratingVideo ? (
+                      <>
+                        <span className="material-symbols-outlined animate-spin text-[18px]">sync</span>
+                        <span>생성 중...</span>
+                      </>
+                   ) : (
+                      <>
+                        <span className="material-symbols-outlined text-[18px]">movie_filter</span>
+                        <span>모든 장면 영상 생성</span>
+                      </>
+                   )}
+                </button>
                 {scenes.map((scene, idx) => (
                    <div 
                      key={scene.id}
@@ -1215,38 +1348,8 @@ Respond in JSON format:
           <h2 className="text-white text-lg font-bold font-display tracking-tight cursor-pointer hidden md:block">AI 비디오 크리에이터</h2>
         </div>
 
-        {/* Step Navigator */}
-        <div className="flex-1 flex items-center justify-center gap-1 overflow-x-auto no-scrollbar mx-4">
-           {PROCESS_STEPS.map((s, idx) => {
-               const isActive = s.step === step;
-               const isCompleted = idx < currentIdx;
-               const isReachable = idx <= Math.max(currentIdx, maxIdx);
-               
-               return (
-                  <React.Fragment key={s.step}>
-                     {idx > 0 && (
-                        <div className={`w-4 sm:w-8 h-[1px] transition-colors ${idx <= Math.max(currentIdx, maxIdx) ? 'bg-primary/50' : 'bg-[#292348]'}`}></div>
-                     )}
-                     <button
-                        onClick={() => isReachable && setStep(s.step)}
-                        disabled={!isReachable}
-                        className={`flex items-center gap-2 px-2 sm:px-3 py-1.5 rounded-full border transition-all whitespace-nowrap ${
-                           isActive 
-                              ? 'bg-primary text-white border-primary shadow-lg shadow-primary/25 scale-105' 
-                              : isReachable
-                                 ? 'bg-[#0d0a1a] text-white border-[#292348] hover:border-primary/50 hover:bg-[#292348]'
-                                 : 'bg-transparent text-[#9b92c9]/30 border-transparent cursor-not-allowed hidden sm:flex'
-                        }`}
-                     >
-                        <span className={`material-symbols-outlined text-[16px] sm:text-[18px] ${isActive ? 'filled' : ''}`}>
-                           {isCompleted ? 'check_circle' : s.icon}
-                        </span>
-                        <span className="text-[10px] sm:text-xs font-bold">{s.label}</span>
-                     </button>
-                  </React.Fragment>
-               );
-            })}
-        </div>
+        {/* Step Navigator (상단ProgressBar로 대체됨) */}
+        <div className="flex-1"></div>
 
         <div className="flex justify-end gap-3 items-center min-w-[200px]">
           <button onClick={() => setShowApiKeyModal(true)} className="p-2 rounded-lg hover:bg-[#292348] text-white/70 hover:text-white transition-all" title="설정">
@@ -2264,10 +2367,12 @@ Respond in JSON format:
                       {/* Video/Image */}
                       {currentScene.videoClipUrl && currentScene.videoClipUrl.length > 50 ? (
                         <video
+                          ref={videoRef}
                           key={currentScene.videoClipUrl}
                           src={currentScene.videoClipUrl}
-                          autoPlay loop playsInline
+                          playsInline
                           className="w-full h-full object-contain"
+                          onEnded={() => setIsPlayingScene(false)}
                         />
                       ) : (
                         <img 
@@ -2277,11 +2382,22 @@ Respond in JSON format:
                           alt=""
                         />
                       )}
+
+                      {/* Playback Control Overlay */}
+                      <div 
+                        className="absolute inset-0 flex items-center justify-center cursor-pointer group/play"
+                        onClick={() => setIsPlayingScene(!isPlayingScene)}
+                      >
+                         {!isPlayingScene && (
+                            <div className="w-20 h-20 rounded-full bg-black/40 backdrop-blur-sm border border-white/20 flex items-center justify-center text-white transition-transform group-hover/play:scale-110 shadow-2xl">
+                               <span className="material-symbols-outlined text-5xl ml-2">play_arrow</span>
+                            </div>
+                         )}
+                      </div>
                       
                       {/* Subtitle Overlay (자막 ON/OFF에 따라 표시) */}
                       {showSubtitles && currentScene.script && (
                         <div 
-                          className="absolute left-0 right-0 flex justify-center px-6 pointer-events-none transition-all"
                           style={{ bottom: `${subtitleY}%` }}
                         >
                           <div 
@@ -2317,6 +2433,7 @@ Respond in JSON format:
                             <span className="material-symbols-outlined text-green-400 !text-[20px]">volume_up</span>
                             <div className="flex-1">
                               <audio 
+                                ref={audioRef}
                                 key={currentScene.audioUrl}
                                 src={currentScene.audioUrl}
                                 controls
@@ -2879,7 +2996,20 @@ Respond in JSON format:
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden text-white bg-background-dark font-sans selection:bg-primary/30 selection:text-white">
+    <div className="flex h-screen w-screen overflow-hidden text-white bg-background-dark font-sans selection:bg-primary/30 selection:text-white pt-[72px]">
+      <ProgressBar currentStep={step} />
+
+      {showRecoveryModal && hasAutoSave && (
+        <RecoveryModal
+          timestamp={loadAutoSave()?.timestamp || new Date().toISOString()}
+          onRecover={handleRecoverAutoSave}
+          onDismiss={() => {
+            setShowRecoveryModal(false);
+            clearAutoSave();
+          }}
+        />
+      )}
+
       {renderSidebar()}
 
       <div className="flex-1 flex flex-col overflow-hidden relative">
