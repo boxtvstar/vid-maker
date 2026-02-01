@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import { fal } from '@fal-ai/client';
 import videoRoutes from './routes/videoRoutes.js';
 import ttsRoutes from './routes/ttsRoutes.js';
+import llmRoutes from './routes/llmRoutes.js';
+import imageRoutes from './routes/imageRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 import path from 'path';
@@ -38,6 +40,8 @@ app.use(express.json({ limit: '50mb' })); // 큰 base64 이미지 허용
 // Routes
 app.use('/api/video', videoRoutes);
 app.use('/api/tts', ttsRoutes);
+app.use('/api/llm', llmRoutes);
+app.use('/api/image', imageRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

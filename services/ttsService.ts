@@ -46,6 +46,29 @@ export interface BatchTTSResult {
 }
 
 /**
+ * 음성 미리듣기 (샘플 문장으로 TTS 생성)
+ */
+export async function previewVoiceTTS(voice: string): Promise<string> {
+  const response = await fetch(`${API_BASE_URL}/api/tts/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voice })
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: response.statusText }));
+    throw new Error(error.message || error.error || 'Voice preview failed');
+  }
+
+  const data = await response.json();
+  if (!data.success || !data.audioUrl) {
+    throw new Error(data.error || 'No audio URL returned');
+  }
+
+  return data.audioUrl;
+}
+
+/**
  * 지원 음성 목록 가져오기
  */
 export async function getSupportedVoices(): Promise<Voice[]> {
@@ -134,6 +157,38 @@ export async function generateTTSForScenes(
   });
 
   return audioMap;
+}
+
+/**
+ * Whisper STT로 오디오 전사 (자막 자동 싱크용)
+ */
+export interface TranscribeSegment {
+  id: string;
+  text: string;
+  startTime: number;
+  endTime: number;
+}
+
+export interface TranscribeResult {
+  success: boolean;
+  segments: TranscribeSegment[];
+  fullText: string;
+  error?: string;
+}
+
+export async function transcribeAudio(audioUrl: string, language: string = 'ko'): Promise<TranscribeResult> {
+  const response = await fetch(`${API_BASE_URL}/api/tts/transcribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audioUrl, language })
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: response.statusText }));
+    throw new Error(error.message || error.error || 'Transcription failed');
+  }
+
+  return response.json();
 }
 
 // 기본 음성 목록 (오프라인 폴백용)

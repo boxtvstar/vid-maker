@@ -6,13 +6,21 @@ export enum CreationStep {
   SCENE_REVIEW = 4,
   MOTION = 5,
   AUDIO_STYLE = 6,
-  FINAL = 7
+  SUBTITLE = 7,
+  FINAL = 8
 }
 
 export interface ScriptBlock {
   id: number;
   title: string;
   content: string;
+}
+
+export interface SubtitleSegment {
+  id: string;
+  text: string;
+  startTime: number;  // 장면 내 상대 시간 (초)
+  endTime: number;
 }
 
 export interface Scene {
@@ -27,7 +35,8 @@ export interface Scene {
   motionStyle?: string;
   videoClipUrl?: string;
   motionType?: 'auto' | 'zoom_in' | 'zoom_out' | 'pan_left' | 'pan_right' | 'static';
-  audioUrl?: string;  // 장면별 TTS 오디오 URL
+  audioUrl?: string;
+  subtitleSegments?: SubtitleSegment[];  // 자막 분할 구간
 }
 
 export interface Voice {

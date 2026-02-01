@@ -3,6 +3,7 @@ import { CreationStep } from './types';
 
 interface ProgressBarProps {
   currentStep: CreationStep;
+  onStepClick?: (step: CreationStep) => void;
 }
 
 const STEP_INFO = [
@@ -14,12 +15,12 @@ const STEP_INFO = [
   { step: CreationStep.FINAL, label: '완료', icon: 'check_circle' },
 ];
 
-export const ProgressBar: React.FC<ProgressBarProps> = ({ currentStep }) => {
+export const ProgressBar: React.FC<ProgressBarProps> = ({ currentStep, onStepClick }) => {
   const currentIndex = STEP_INFO.findIndex(s => s.step === currentStep);
   const progress = ((currentIndex + 1) / STEP_INFO.length) * 100;
 
   return (
-    <div className="fixed top-0 left-0 right-0 z-50 bg-[#0a0618] border-b border-white/10 shadow-lg">
+    <div className="w-full z-50 bg-[#0a0618] border-b border-white/10 shadow-lg flex-shrink-0">
       <div className="max-w-7xl mx-auto px-4 py-3">
         {/* Progress Bar */}
         <div className="relative h-2 bg-white/5 rounded-full overflow-hidden mb-3">
@@ -36,9 +37,10 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({ currentStep }) => {
             const isCompleted = index < currentIndex;
             
             return (
-              <div 
-                key={stepInfo.step} 
-                className="flex flex-col items-center gap-1 flex-1"
+              <div
+                key={stepInfo.step}
+                className="flex flex-col items-center gap-1 flex-1 cursor-pointer group"
+                onClick={() => onStepClick?.(stepInfo.step)}
               >
                 <div className="flex items-center w-full">
                   {index > 0 && (
@@ -46,13 +48,13 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({ currentStep }) => {
                       isCompleted ? 'bg-primary' : 'bg-white/10'
                     }`} />
                   )}
-                  
-                  <div className={`flex items-center justify-center w-8 h-8 rounded-full transition-all ${
-                    isActive 
-                      ? 'bg-primary text-white scale-110 shadow-lg' 
-                      : isCompleted 
-                      ? 'bg-primary/30 text-primary' 
-                      : 'bg-white/5 text-white/30'
+
+                  <div className={`flex items-center justify-center w-8 h-8 rounded-full transition-all group-hover:scale-110 group-hover:shadow-lg ${
+                    isActive
+                      ? 'bg-primary text-white scale-110 shadow-lg'
+                      : isCompleted
+                      ? 'bg-primary/30 text-primary group-hover:bg-primary/50'
+                      : 'bg-white/5 text-white/30 group-hover:bg-white/10 group-hover:text-white/60'
                   }`}>
                     {isCompleted ? (
                       <span className="material-symbols-outlined text-[16px]">check</span>
@@ -60,16 +62,16 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({ currentStep }) => {
                       <span className="material-symbols-outlined text-[16px]">{stepInfo.icon}</span>
                     )}
                   </div>
-                  
+
                   {index < STEP_INFO.length - 1 && (
                     <div className={`h-0.5 flex-1 transition-colors ${
                       isCompleted ? 'bg-primary' : 'bg-white/10'
                     }`} />
                   )}
                 </div>
-                
+
                 <span className={`text-[10px] font-bold transition-colors hidden md:block ${
-                  isActive ? 'text-primary' : isCompleted ? 'text-white/70' : 'text-white/30'
+                  isActive ? 'text-primary' : isCompleted ? 'text-white/70' : 'text-white/30 group-hover:text-white/60'
                 }`}>
                   {stepInfo.label}
                 </span>

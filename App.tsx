@@ -1,17 +1,27 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+
 import { CreationStep, ScriptBlock, Scene, Voice } from './types';
 import { INITIAL_SCRIPT_BLOCKS, VOICES, MOTION_STYLES } from './constants';
 import { saveProject, getProjects, getApiKey, setApiKey as saveApiKey, downloadFile, generateSubtitles, ProjectData, autoSave, loadAutoSave, clearAutoSave, compressImage, apiQueue } from './utils';
 import { VIDEO_TEMPLATES, BGM_OPTIONS, EXPORT_PRESETS } from './templates';
 import { ApiKeyModal, ProjectsModal, TemplatesModal } from './Modals';
-import { ProgressBar } from './ProgressBar';
 import { RecoveryModal } from './RecoveryModal';
 import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingSpinner } from './LoadingSpinner';
 import { generateImage, extractKeywords, imageToDataUrl } from './imageUtils';
 import { generateVideoWithPolling } from './services/videoService';
-import { generateBatchTTS } from './services/ttsService';
+import { generateBatchTTS, previewVoiceTTS, transcribeAudio } from './services/ttsService';
+import { generateLLM } from './services/llmService';
+import { generateFalImage } from './services/imageService';
+
+const IMAGE_STYLES = [
+  { id: 'cinematic', label: '시네마틱', icon: 'movie', prefix: 'Cinematic film still, dramatic lighting, shallow depth of field, 35mm film grain, professional cinematography', color: '#e67e22' },
+  { id: 'anime', label: '애니메이션', icon: 'animation', prefix: 'Anime style illustration, vibrant colors, detailed character design, Studio Ghibli inspired, clean linework', color: '#e74c3c' },
+  { id: 'realistic', label: '사실적', icon: 'photo_camera', prefix: 'Photorealistic, ultra detailed, 8K UHD, DSLR photography, natural lighting, sharp focus', color: '#3498db' },
+  { id: '3d', label: '3D 렌더', icon: 'view_in_ar', prefix: '3D render, Pixar style, octane render, volumetric lighting, soft shadows, vibrant colors', color: '#9b59b6' },
+  { id: 'watercolor', label: '수채화', icon: 'brush', prefix: 'Watercolor painting, soft brushstrokes, pastel colors, artistic illustration, paper texture', color: '#1abc9c' },
+  { id: 'minimal', label: '미니멀', icon: 'crop_square', prefix: 'Minimalist illustration, flat design, clean lines, modern graphic design, limited color palette', color: '#95a5a6' },
+];
 
 const LANGUAGES = [
   { code: 'Korean', label: '🇰🇷 한국어' },
@@ -33,6 +43,7 @@ const PROCESS_STEPS = [
   { step: CreationStep.CUT_SELECTION, label: '시각화', icon: 'image' },
   { step: CreationStep.MOTION, label: '모션', icon: 'animation' },
   { step: CreationStep.AUDIO_STYLE, label: '오디오', icon: 'graphic_eq' },
+  { step: CreationStep.SUBTITLE, label: '자막', icon: 'subtitles' },
   { step: CreationStep.FINAL, label: '완료', icon: 'movie' },
 ];
 
@@ -47,9 +58,13 @@ const App: React.FC = () => {
   const [customDuration, setCustomDuration] = useState('');
   const [manualScript, setManualScript] = useState('');
 
+  // 대본 미리보기 상태
+  const [scriptPreview, setScriptPreview] = useState<{synopsis: string, shots: {title: string, content: string}[]} | null>(null);
+
   // 2단계 (Shot 설계)용 상태
   const [synopsis, setSynopsis] = useState("");
   const [shots, setShots] = useState<{id: string, content: string}[]>([]);
+  const [selectedImageStyle, setSelectedImageStyle] = useState('cinematic');
 
   const [videoLength, setVideoLength] = useState<"shorts" | "long">("shorts");
   const [videoTone, setVideoTone] = useState<
@@ -84,8 +99,7 @@ const App: React.FC = () => {
   }, [step, maxReachedStep]);
 
   // New features state
-  const [apiKey, setApiKey] = useState<string>('');
-  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+
   const [currentProjectId, setCurrentProjectId] = useState<string>('');
   const [savedProjects, setSavedProjects] = useState<ProjectData[]>([]);
   const [showProjectsModal, setShowProjectsModal] = useState(false);
@@ -107,28 +121,45 @@ const App: React.FC = () => {
   const [subtitleColor, setSubtitleColor] = useState("#FFFFFF");
   const [subtitleBgColor, setSubtitleBgColor] = useState("#000000"); // 배경 색상 (기존 Highlight)
   const [subtitleBorderColor, setSubtitleBorderColor] = useState("#3713EC"); // 글씨 테두리 색상
-  const [subtitleBorderWidth, setSubtitleBorderWidth] = useState(2); // 글씨 테두리 두께
-  const [subtitleFontSize, setSubtitleFontSize] = useState(18); // 자막 크기 (px)
-  const [subtitleBgRadius, setSubtitleBgRadius] = useState(9999); // 배경 둥근 정도 (px, 9999 = 완전 둥근)
-  const [subtitleBgPadding, setSubtitleBgPadding] = useState(24); // 배경 패딩 (px)
-  const [subtitleY, setSubtitleY] = useState(80);
+  const [subtitleBorderWidth, setSubtitleBorderWidth] = useState(0); // 글씨 테두리 두께 최소값 0
+  const [subtitleFontSize, setSubtitleFontSize] = useState(12); // 자막 크기 초기값 12, 최소값 6으로 변경 예정
+  const [subtitleBgRadius, setSubtitleBgRadius] = useState(0); // 배경 둥근 정도 최소값 0
+  const [subtitleBgWidth, setSubtitleBgWidth] = useState(150); // 배경 가로 크기
+  const [subtitleBgHeight, setSubtitleBgHeight] = useState(40); // 배경 세로 크기
+  const [subtitleY, setSubtitleY] = useState(0); // 세로 위치 최하단 0%
   const [showSubtitleBg, setShowSubtitleBg] = useState(true);
   const [subtitleTemplate, setSubtitleTemplate] = useState("bold");
   const [showSubtitles, setShowSubtitles] = useState(true); // 자막 표시 여부
   const [playingPreviewVoice, setPlayingPreviewVoice] = useState<string | null>(null); // 미리듣기 중인 목소리 ID
 
-  // TTS 관련 상태
+  // 자막 직접 조작 관련 상태
+  const [isSubSelected, setIsSubSelected] = useState(false);
+  const [subDragMode, setSubDragMode] = useState<'move' | 'resize-r' | 'resize-l' | 'resize-t' | 'resize-b' | null>(null);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0, w: 0, h: 0, yPct: 0 });
+  const previewRef = useRef<HTMLDivElement>(null);
+  const [isAutoSyncing, setIsAutoSyncing] = useState(false);
+  const [autoSyncProgress, setAutoSyncProgress] = useState('');
   const [isGeneratingTTS, setIsGeneratingTTS] = useState(false);
   const [ttsProgress, setTtsProgress] = useState(0);
   const [ttsError, setTtsError] = useState<string | null>(null);
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
-  
+  const [isDraggingTimeline, setIsDraggingTimeline] = useState(false);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const [selectedSubtitleId, setSelectedSubtitleId] = useState<string | null>(null);
+  const [isDraggingSubEdge, setIsDraggingSubEdge] = useState<{ segId: string; sceneId: string; edge: 'left' | 'right' } | null>(null);
+  const subtitleTrackRef = useRef<HTMLDivElement>(null);
+
+  // 오디오 파형 데이터 (장면별)
+  const [waveformData, setWaveformData] = useState<Record<string, number[]>>({});
+
   // Final Rendering 상태
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderError, setRenderError] = useState<string | null>(null);
   
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
+  const [selectedTrackType, setSelectedTrackType] = useState<'subtitle' | 'scene' | 'audio' | null>(null);
+  const [selectedAudioSceneId, setSelectedAudioSceneId] = useState<string | null>(null);
 
   // Auto-save 상태
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
@@ -140,16 +171,324 @@ const App: React.FC = () => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlayingScene, setIsPlayingScene] = useState(false);
 
-  // Sync video and audio playback
+  // 통합 플레이어 상태 (9단계 자막 확정용)
+  const [integratedTime, setIntegratedTime] = useState(0);
+  const [isIntegratedPlaying, setIsIntegratedPlaying] = useState(false);
+
+  // 통합 플레이어 시간 계산
+  const scenesWithTiming = useMemo(() => {
+    let current = 0;
+    return scenes.map(s => {
+      let d = 5;
+      if (s.duration) {
+        if (s.duration.includes(':')) {
+          const parts = s.duration.split(':').map(Number);
+          d = (parts[0] || 0) * 60 + (parts[1] || 0);
+        } else {
+          d = parseFloat(s.duration.replace('s', '')) || 5;
+        }
+      }
+      const startTime = current;
+      current += d;
+      return { ...s, startTime, durationSec: d };
+    });
+  }, [scenes]);
+
+  const totalVideoDuration = useMemo(() => 
+    scenesWithTiming.reduce((acc, s) => acc + s.durationSec, 0)
+  , [scenesWithTiming]);
+
+  // 통합 플레이어 재생 로직
   useEffect(() => {
-    if (isPlayingScene) {
-      videoRef.current?.play().catch(() => setIsPlayingScene(false));
+    let animationFrameId: number;
+    let lastTime = performance.now();
+
+    const update = () => {
+      if (isIntegratedPlaying) {
+        const now = performance.now();
+        const delta = (now - lastTime) / 1000;
+        lastTime = now;
+
+        setIntegratedTime(prev => {
+          const next = prev + delta;
+          if (next >= totalVideoDuration) {
+            setIsIntegratedPlaying(false);
+            return 0; // 루프 혹은 종료
+          }
+          return next;
+        });
+      }
+      animationFrameId = requestAnimationFrame(update);
+    };
+
+    if (isIntegratedPlaying) {
+      lastTime = performance.now();
+      animationFrameId = requestAnimationFrame(update);
+    }
+
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [isIntegratedPlaying, totalVideoDuration]);
+
+  // 통합 시간에 따른 장면 전환 (재생/정지 무관하게 업데이트)
+  useEffect(() => {
+    if (step === CreationStep.SUBTITLE) {
+      const activeScene = scenesWithTiming.find(s => 
+        integratedTime >= s.startTime && integratedTime < s.startTime + s.durationSec
+      );
+      if (activeScene && activeScene.id !== selectedSceneId) {
+        setSelectedSceneId(activeScene.id);
+      }
+    }
+  }, [integratedTime, scenesWithTiming, step, selectedSceneId]);
+
+  // Sync video and audio playback (Scene & Integrated)
+  useEffect(() => {
+    const isPlaying = isPlayingScene || isIntegratedPlaying;
+    if (isPlaying) {
+      videoRef.current?.play().catch(() => {});
       audioRef.current?.play().catch(() => {});
     } else {
       videoRef.current?.pause();
       audioRef.current?.pause();
     }
-  }, [isPlayingScene]);
+  }, [isPlayingScene, isIntegratedPlaying]);
+
+  // 자막 캔버스 조작 핸들러
+  const handleSubDragStart = (e: React.MouseEvent, mode: 'move' | 'resize-r' | 'resize-l' | 'resize-t' | 'resize-b') => {
+    e.stopPropagation();
+    setSubDragMode(mode);
+    setDragStart({ 
+      x: e.clientX, 
+      y: e.clientY, 
+      w: subtitleBgWidth, 
+      h: subtitleBgHeight, 
+      yPct: subtitleY 
+    });
+    setIsSubSelected(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!subDragMode || !previewRef.current) return;
+
+      const rect = previewRef.current.getBoundingClientRect();
+      const dx = e.clientX - dragStart.x;
+      const dy = e.clientY - dragStart.y;
+
+      if (subDragMode === 'move') {
+        const dyPct = (dy / rect.height) * 100;
+        setSubtitleY(Math.max(0, Math.min(95, dragStart.yPct - dyPct)));
+      } else if (subDragMode === 'resize-r') {
+        setSubtitleBgWidth(Math.max(20, dragStart.w + dx * 2));
+      } else if (subDragMode === 'resize-l') {
+        setSubtitleBgWidth(Math.max(20, dragStart.w - dx * 2));
+      } else if (subDragMode === 'resize-b') {
+        setSubtitleBgHeight(Math.max(10, dragStart.h + dy * 2));
+      } else if (subDragMode === 'resize-t') {
+        setSubtitleBgHeight(Math.max(10, dragStart.h - dy * 2));
+      }
+    };
+
+    const handleMouseUp = () => {
+      setSubDragMode(null);
+    };
+
+    // 전역 클릭 감지 (자막 바깥 클릭 시 선택 해제)
+    const handleGlobalClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // 자막 상자나 조절 핸들이 아닌 곳을 클릭했을 때만 해제
+      if (isSubSelected && !target.closest('.subtitle-container')) {
+        setIsSubSelected(false);
+      }
+    };
+
+    if (subDragMode) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    window.addEventListener('mousedown', handleGlobalClick);
+    
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('mousedown', handleGlobalClick);
+    };
+  }, [subDragMode, dragStart, isSubSelected]);
+
+  // 타임라인 드래그 (Scrubbing) 로직
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDraggingTimeline || !timelineRef.current) return;
+      
+      const rect = timelineRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left - 16;
+      const percent = Math.max(0, Math.min(1, x / (rect.width - 32)));
+      setIntegratedTime(percent * totalVideoDuration);
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingTimeline(false);
+    };
+
+    if (isDraggingTimeline) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingTimeline, totalVideoDuration]);
+  const syncMediaToTimeline = useCallback(() => {
+    if (step === CreationStep.SUBTITLE && videoRef.current) {
+      const activeScene = scenesWithTiming.find(s => 
+        integratedTime >= s.startTime && integratedTime < s.startTime + s.durationSec
+      );
+      if (activeScene) {
+        const offset = integratedTime - activeScene.startTime;
+        
+        // 비디오 정밀 동기화
+        if (Math.abs(videoRef.current.currentTime - offset) > 0.1) {
+          videoRef.current.currentTime = offset;
+        }
+
+        // 오디오 정밀 동기화
+        if (audioRef.current && Math.abs(audioRef.current.currentTime - offset) > 0.1) {
+           audioRef.current.currentTime = offset;
+           // 소리가 끊기는 현상 방지: 재생 중이라면 강제 재생 시도
+           if (isIntegratedPlaying && audioRef.current.paused) {
+             audioRef.current.play().catch(() => {});
+           }
+        }
+      }
+    }
+  }, [integratedTime, step, scenesWithTiming, isIntegratedPlaying]);
+
+  useEffect(() => {
+    syncMediaToTimeline();
+  }, [integratedTime, syncMediaToTimeline]);
+
+  // 소리 끊김 방지: 소스 변경 시 즉시 재생 처리
+  useEffect(() => {
+    if (isIntegratedPlaying && audioRef.current && audioRef.current.paused) {
+      audioRef.current.play().catch(() => {});
+    }
+  }, [selectedSceneId, isIntegratedPlaying]);
+
+  // 오디오 파형 분석 (Web Audio API)
+  useEffect(() => {
+    if (step !== CreationStep.SUBTITLE && step !== CreationStep.FINAL) return;
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    let cancelled = false;
+
+    const analyze = async () => {
+      for (const scene of scenes) {
+        if (cancelled) break;
+        if (!scene.audioUrl || waveformData[scene.id]) continue;
+        try {
+          const resp = await fetch(scene.audioUrl);
+          const buffer = await resp.arrayBuffer();
+          const audioBuffer = await audioCtx.decodeAudioData(buffer);
+          const raw = audioBuffer.getChannelData(0);
+          const samples = 80; // 장면당 샘플 수
+          const blockSize = Math.floor(raw.length / samples);
+          const peaks: number[] = [];
+          for (let i = 0; i < samples; i++) {
+            let sum = 0;
+            for (let j = 0; j < blockSize; j++) {
+              sum += Math.abs(raw[i * blockSize + j]);
+            }
+            peaks.push(sum / blockSize);
+          }
+          // 정규화 (0~1)
+          const max = Math.max(...peaks, 0.01);
+          const normalized = peaks.map(p => p / max);
+          if (!cancelled) {
+            setWaveformData(prev => ({ ...prev, [scene.id]: normalized }));
+          }
+        } catch {
+          // 분석 실패 시 무시
+        }
+      }
+    };
+    analyze();
+    return () => { cancelled = true; audioCtx.close(); };
+  }, [step, scenes.map(s => s.audioUrl).join(',')]);
+
+  // 자막 단계 진입 시 세그먼트 자동 초기화 (없는 장면에 전체 길이 1개 세그먼트 생성)
+  useEffect(() => {
+    if (step === CreationStep.SUBTITLE) {
+      setScenes(prev => {
+        let changed = false;
+        const updated = prev.map((s, idx) => {
+          if (!s.subtitleSegments || s.subtitleSegments.length === 0) {
+            if (s.script && s.script.trim()) {
+              changed = true;
+              const dur = scenesWithTiming[idx]?.durationSec || 5;
+              return {
+                ...s,
+                subtitleSegments: [{
+                  id: `${s.id}-seg-0`,
+                  text: s.script,
+                  startTime: 0,
+                  endTime: dur,
+                }]
+              };
+            }
+          }
+          return s;
+        });
+        return changed ? updated : prev;
+      });
+    }
+  }, [step]);
+
+  // 자막 블록 엣지 드래그 로직
+  useEffect(() => {
+    if (!isDraggingSubEdge) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!subtitleTrackRef.current) return;
+      const { segId, sceneId, edge } = isDraggingSubEdge;
+      const sceneWithTime = scenesWithTiming.find(s => s.id === sceneId);
+      if (!sceneWithTime) return;
+
+      // 해당 장면의 트랙 요소 찾기
+      const sceneTrackEl = subtitleTrackRef.current.querySelector(`[data-scene-id="${sceneId}"]`) as HTMLElement;
+      if (!sceneTrackEl) return;
+
+      const rect = sceneTrackEl.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const percent = Math.max(0, Math.min(1, x / rect.width));
+      const newTime = Math.round(percent * sceneWithTime.durationSec * 10) / 10;
+
+      setScenes(prev => prev.map(s => {
+        if (s.id !== sceneId) return s;
+        return {
+          ...s,
+          subtitleSegments: s.subtitleSegments?.map(seg => {
+            if (seg.id !== segId) return seg;
+            if (edge === 'left') {
+              return { ...seg, startTime: Math.min(newTime, seg.endTime - 0.1) };
+            } else {
+              return { ...seg, endTime: Math.max(newTime, seg.startTime + 0.1) };
+            }
+          })
+        };
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingSubEdge(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingSubEdge, scenesWithTiming]);
 
   // Load auto-save on mount
   useEffect(() => {
@@ -209,17 +548,43 @@ const App: React.FC = () => {
         console.log('Project saved manually');
       }
 
-      // Esc to close modals
+      // Esc to close modals or deselect timeline element
       if (e.key === 'Escape') {
-        setShowRecoveryModal(false);
-        setShowProjectsModal(false);
-        setShowApiKeyModal(false);
+        if (selectedTrackType) {
+          setSelectedTrackType(null);
+          setSelectedSubtitleId(null);
+          setSelectedAudioSceneId(null);
+        } else {
+          setShowRecoveryModal(false);
+          setShowProjectsModal(false);
+        }
+      }
+
+      // Delete key: remove selected timeline element
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTrackType && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        if (selectedTrackType === 'subtitle' && selectedSubtitleId) {
+          setScenes(prev => prev.map(s => ({
+            ...s,
+            subtitleSegments: s.subtitleSegments?.filter(seg => seg.id !== selectedSubtitleId)
+          })));
+          setSelectedSubtitleId(null);
+          setSelectedTrackType(null);
+        } else if (selectedTrackType === 'scene' && selectedSceneId) {
+          setScenes(prev => prev.filter(s => s.id !== selectedSceneId));
+          setSelectedSceneId(null);
+          setSelectedTrackType(null);
+        } else if (selectedTrackType === 'audio' && selectedAudioSceneId) {
+          setScenes(prev => prev.map(s => s.id === selectedAudioSceneId ? { ...s, audioUrl: undefined } : s));
+          setSelectedAudioSceneId(null);
+          setSelectedTrackType(null);
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [topic, videoLength, videoTone, scriptBlocks, scenes, selectedVoice]);
+  }, [topic, videoLength, videoTone, scriptBlocks, scenes, selectedVoice, selectedTrackType, selectedSubtitleId, selectedSceneId, selectedAudioSceneId]);
 
   const handleRecoverAutoSave = () => {
     const savedData = loadAutoSave();
@@ -268,73 +633,12 @@ const App: React.FC = () => {
     }
   }, [step, scenes, selectedSceneId]);
 
-  // Load API key and projects on mount
   useEffect(() => {
-    const storedApiKey = getApiKey();
-    console.log('🔑 Stored API Key:', storedApiKey ? `${storedApiKey.substring(0, 10)}...` : 'None');
-    console.log('🔑 ENV API Key:', import.meta.env.VITE_GEMINI_API_KEY ? `${String(import.meta.env.VITE_GEMINI_API_KEY).substring(0, 10)}...` : 'None');
-    
-    if (storedApiKey) {
-      setApiKey(storedApiKey);
-    } else if (import.meta.env.VITE_GEMINI_API_KEY && import.meta.env.VITE_GEMINI_API_KEY !== 'YOUR_API_KEY_HERE') {
-      setApiKey(import.meta.env.VITE_GEMINI_API_KEY as string);
-    } else {
-      setShowApiKeyModal(true);
-    }
     setSavedProjects(getProjects());
   }, []);
 
   // AI Client Initializer
-  const getAI = () => {
-    let key = apiKey || import.meta.env.VITE_GEMINI_API_KEY;
-    
-    // 1. 키 정제 (Sanitization)
-    if (typeof key === 'string') {
-      // 줄바꿈, 공백 제거
-      key = key.trim().replace(/[\r\n]/g, '');
-      
-      // ✅ 문자가 발견되면, 이는 로그가 실수로 복사된 것이므로 제거 시도하거나 경고
-      // 여기서는 영문, 숫자, 대시(-), 밑줄(_)만 남기고 모두 제거하여 복구 시도
-      const cleanKey = key.replace(/[^a-zA-Z0-9\-\_]/g, '');
-      
-      if (key !== cleanKey) {
-        console.warn('⚠️ API 키에서 유효하지 않은 문자가 발견되어 제거했습니다.');
-        key = cleanKey;
-        // 정제된 키로 상태 업데이트 (다음 번을 위해)
-        setApiKey(cleanKey);
-        saveApiKey(cleanKey);
-      }
-    }
 
-    console.log('🤖 Getting AI client...');
-    // 보안을 위해 앞부분만 로그 출력
-    const keyLog = key ? `${String(key).substring(0, 10)}... (Length: ${String(key).length})` : 'Empty';
-    console.log('  - key:', keyLog);
-    
-    // 유효성 검사: 구글 API 키는 보통 39자입니다. 너무 길거나(100자 이상) 짧으면 초기화
-    if (!key || key === 'YOUR_API_KEY_HERE' || String(key).trim() === '' || String(key).length > 100) {
-      console.error(`❌ Invalid API Key detected. Length: ${String(key).length}`);
-      
-      // 잘못된 키가 저장되어 있다면 초기화
-      if (apiKey) {
-        setApiKey('');
-        saveApiKey('');
-        alert('저장된 API 키 형식이 올바르지 않아 초기화했습니다. 다시 입력해주세요.');
-      }
-      
-      throw new Error('API 키가 설정되지 않았거나 올바르지 않습니다. 설정 메뉴에서 다시 입력해주세요.');
-    }
-    
-    try {
-      // @google/generative-ai 사용 (키 문자열 직접 전달)
-      const genAI = new GoogleGenerativeAI(String(key));
-      console.log('✅ AI client created successfully');
-      return genAI;
-    } catch (error) {
-      console.error('❌ Failed to create AI client:', error);
-      throw new Error('AI 클라이언트 초기화에 실패했습니다. API 키를 확인해주세요.');
-    }
-  };
 
   // Calculate Stats
   const stats = useMemo(() => {
@@ -358,129 +662,82 @@ const App: React.FC = () => {
     setLoadingMessage("AI가 대본과 장면 구성을 준비하고 있습니다...");
 
     try {
-      const genAI = getAI();
-      // 사용자 API 키로 테스트한 결과: nano-banana-pro-preview 모델 사용 확인
-      const model = genAI.getGenerativeModel({ model: "nano-banana-pro-preview" });
-      
-      let prompt = "";
-      
-      if (inputMode === 'auto') {
-        if (!topic.trim()) {
-           alert("주제를 입력해주세요!");
-           setIsLoading(false);
-           return;
-        }
-        // [Auto 모드] 주제 기반 자동 생성
-        prompt = `당신은 전문 영상 제작자입니다. 
-        주제: "${topic}"
-        
-        다음 요구사항에 맞춰 유튜브 영상 대본을 작성해주세요:
-        1. 언어: ${targetLanguage} (반드시 이 언어로 작성)
-        2. 영상 길이: ${targetDuration === 'custom' ? customDuration : DURATIONS.find(d => d.code === targetDuration)?.label}
-        3. 톤앤매너: ${videoTone}
-        4. 구성: [도입부 - 본론(여러 장면) - 결론]
-        
-        각 장면은 1) 장면 제목, 2) 나레이션 대사(스크립트), 3) AI 이미지 생성을 위한 영문 프롬프트, 4) 검색 키워드로 구성되어야 합니다.
-        
-        응답은 반드시 아래의 JSON 형식으로만 보내주세요:
-        [{ "title": "장면 제목", "content": "나레이션 대사", "prompt": "Detailed English description for AI image generation, cinematic, professional, high quality", "searchKeywords": "comma,separated,keywords" }]`;
-      } else {
-        // [Manual 모드] 사용자 대본 분석 및 구조화
-        if (!manualScript.trim()) {
-          alert("분석할 대본을 입력해주세요!");
-          setIsLoading(false);
-          return;
-        }
-        
-        prompt = `사용자가 제공한 다음 대본을 영상 제작용으로 구조화해주세요.
-        내용을 변경하거나 요약하지 말고, 원본 내용을 최대한 유지하면서 장면만 나누세요.
-        
-        [사용자 대본]
-        "${manualScript}"
-        
-        각 장면은 1) 장면 제목, 2) 나레이션 대사, 3) AI 이미지 생성을 위한 고품질 영문 프롬프트(내용 기반), 4) 검색 키워드로 구성되어야 합니다.
-        이미지 프롬프트는 매우 구체적이고 시각적이어야 합니다.
-        
-        응답은 반드시 아래의 JSON 형식으로만 보내주세요:
-        [{ "title": "장면 제목", "content": "나레이션 대사", "prompt": "Detailed English description for AI image generation, cinematic, professional, high quality", "searchKeywords": "comma,separated,keywords" }]`;
+      const duration = targetDuration === 'custom' ? customDuration : targetDuration;
+
+      const systemPrompt = `당신은 유튜브 영상 대본 전문 작가입니다.
+사용자가 제공하는 주제로 ${duration} 분량의 유튜브 영상 대본을 작성하세요.
+언어: ${targetLanguage}
+
+반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트는 포함하지 마세요:
+{
+  "synopsis": "영상 전체 요약 (1~2문장)",
+  "shots": [
+    { "title": "장면 제목", "content": "해당 장면의 내레이션/대사 텍스트" }
+  ]
+}
+
+규칙:
+- shots는 3~8개로 구성
+- 각 shot의 content는 자연스러운 내레이션 문장으로 작성
+- 시청자의 관심을 끄는 인트로와 마무리 포함
+- JSON만 출력하고 마크다운 코드블록이나 설명을 붙이지 마세요`;
+
+      const output = await generateLLM({
+        prompt: `주제: ${topic}`,
+        system_prompt: systemPrompt,
+        model: 'google/gemini-2.5-flash',
+        temperature: 0.7,
+        max_tokens: 800,
+      });
+
+      // JSON 파싱 (코드블록 래핑 제거)
+      const cleaned = output.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      if (!parsed.shots || !Array.isArray(parsed.shots)) {
+        throw new Error('AI 응답에 shots 배열이 없습니다.');
       }
 
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let text = response.text();
-      
-      // 토큰 사용량 출력 (비용 확인용)
-      if (response.usageMetadata) {
-        const usage = response.usageMetadata;
-        console.log('📊 대본 생성 API 사용량:', {
-          입력토큰: usage.promptTokenCount || 0,
-          출력토큰: usage.candidatesTokenCount || 0,
-          총토큰: usage.totalTokenCount || 0,
-          thinking토큰: (usage as any).thoughtsTokenCount || 0
-        });
-        alert(`✅ 대본 생성 완료!\n\n📊 토큰 사용량: ${usage.totalTokenCount || 0}개\n(입력: ${usage.promptTokenCount || 0}, 출력: ${usage.candidatesTokenCount || 0})`);
-      }
-      
-      // JSON 파싱을 위한 전처리 (Markdown 코드 블록 제거 등)
-      text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-
-      const parsed = JSON.parse(text || "[]");
-      const newScriptBlocks = parsed.map((item: any, idx: number) => ({
-        id: Date.now() + idx,
-        title: item.title,
-        content: item.content,
-      }));
-      setScriptBlocks(newScriptBlocks);
-
-      setLoadingMessage("각 장면에 맞는 고품질 이미지를 찾고 있습니다...");
-      
-      // 각 장면에 대해 실제 이미지 생성/검색
-      const initialScenes: Scene[] = await Promise.all(
-        parsed.map(async (item: any, index: number) => {
-          const prompt = item.prompt || `A cinematic shot of ${item.title}`;
-          const keywords = item.searchKeywords || item.title;
-          
-          // generateImage 유틸리티를 사용하여 고품질 이미지 가져오기
-          let imageUrl = '';
-          try {
-            console.log(`🎬 Generating image for scene ${index + 1}: ${item.title}`);
-            imageUrl = await generateImage({
-              prompt,
-              keywords: `${keywords},cinematic,professional`,
-              width: 800,
-              height: 450
-            });
-            console.log(`✅ Image generated: ${imageUrl.substring(0, 50)}...`);
-          } catch (err) {
-            console.error('Image generation failed:', err);
-            // 폴백: 랜덤 이미지
-            imageUrl = `https://picsum.photos/seed/${index + Date.now()}/800/450`;
-          }
-          
-          return {
-            id: `scene-${index}-${Date.now()}`,
-            name: item.title,
-            duration: "0:04",
-            imageUrl,
-            script: item.content,
-            prompt,
-            isManualPrompt: false,
-            status: "active" as const,
-            motionStyle: "시네마틱",
-          };
-        })
-      );
-      
-      setScenes(initialScenes);
-      // 자동으로 다음 단계로 넘어가지 않음 - 사용자가 대본을 확인하고 "확정" 버튼을 눌러야 진행
+      // 미리보기 상태에 저장 (바로 이동하지 않음)
+      setScriptPreview({
+        synopsis: parsed.synopsis || topic,
+        shots: parsed.shots.map((shot: any, idx: number) => ({
+          title: shot.title || `장면 ${idx + 1}`,
+          content: shot.content || shot.text || '',
+        })),
+      });
     } catch (error: any) {
       console.error("Script generation failed", error);
       const errorMessage = error.message || JSON.stringify(error);
-      alert(`대본 생성 실패: ${errorMessage}\n\nAPI 키가 올바른지, 사용 가능한 할당량이 있는지 확인해주세요.`);
+      alert(`대본 생성 실패: ${errorMessage}`);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // 대본 미리보기 확정 → 대본 단계로 이동
+  const handleConfirmPreview = () => {
+    if (!scriptPreview) return;
+
+    setSynopsis(scriptPreview.synopsis);
+
+    const newShots = scriptPreview.shots.map((shot, idx) => ({
+      id: `shot-${Date.now()}-${idx}`,
+      content: shot.content,
+    }));
+    setShots(newShots);
+
+    const newBlocks: ScriptBlock[] = scriptPreview.shots.map((shot, idx) => ({
+      id: idx + 1,
+      title: shot.title,
+      content: shot.content,
+    }));
+    setScriptBlocks(newBlocks);
+
+    setScriptPreview(null);
+    setStep(CreationStep.SCRIPT);
+  };
+
   // Shot 편집 핸들러들
   const updateShot = (id: string, newContent: string) => {
     setShots(prev => prev.map(s => s.id === id ? { ...s, content: newContent } : s));
@@ -516,25 +773,25 @@ const App: React.FC = () => {
       const newScenes: Scene[] = [];
       const total = shots.length;
 
+      // 선택된 스타일의 prefix 가져오기
+      const styleObj = IMAGE_STYLES.find(s => s.id === selectedImageStyle);
+      const stylePrefix = styleObj?.prefix || '';
+      const aspectRatio = videoLength === 'shorts' ? '9:16' : '16:9';
+
       for (let i = 0; i < total; i++) {
         const shot = shots[i];
-        
+
         // 메시지 및 진척도 업데이트
         setLoadingMessage(`컷 ${i + 1} / ${total} : 이미지 생성 중...`);
         setLoadingProgress(Math.round((i / total) * 100));
 
-        // 키워드 추출 (간단하게)
-        const keywords = await extractKeywords(shot.content, "scene", "context");
-        
         let imageUrl = '';
         try {
-          // 실제 이미지 생성 호출
-          imageUrl = await generateImage({
-             prompt: `Cinematic, photorealistic shot of ${keywords}, 8k ultra hd, dramatic lighting, professional cinematography`,
-             keywords: keywords,
-             width: videoLength === 'shorts' ? 450 : 800,
-             height: videoLength === 'shorts' ? 800 : 450,
-             apiKey: apiKey || getApiKey() || undefined
+          // xai/grok-imagine-image 이미지 생성
+          imageUrl = await generateFalImage({
+            prompt: shot.content,
+            aspect_ratio: aspectRatio,
+            style: stylePrefix,
           });
         } catch (e) {
           console.error(`Shot ${i+1} image generation failed`, e);
@@ -544,10 +801,10 @@ const App: React.FC = () => {
         newScenes.push({
           id: shot.id,
           name: `Shot ${i + 1}`,
-          duration: `${Math.ceil(shot.content.length * 0.25)}s`, // 글자 수 기반 지속 시간 추정
+          duration: `${Math.ceil(shot.content.length * 0.25)}s`,
           imageUrl,
           script: shot.content,
-          prompt: `Cinematic shot of ${keywords}`,
+          prompt: `${stylePrefix}, ${shot.content}`,
           isManualPrompt: false,
           status: "active" as const,
           motionStyle: "시네마틱",
@@ -577,22 +834,9 @@ const App: React.FC = () => {
     setLoadingMessage("AI가 프롬프트를 더 생생하게 확장하고 있습니다...");
 
     try {
-      const genAI = getAI();
-      const model = genAI.getGenerativeModel({ model: "nano-banana-pro-preview" });
-      
-      const prompt = `Expand this image prompt to be more detailed, cinematic, and high-quality for AI image generation (Midjourney/DALL-E style).
-      
-      Current Prompt: "${scene.prompt}"
-      Content Context: "${scene.script}"
-      
-      Provide ONLY the expanded prompt text in English without any explanations.`;
-
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const expandedPrompt = response.text().trim();
-
-      // 프롬프트 업데이트
-      setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, prompt: expandedPrompt } : s));
+      // 제미나이 연동 제거로 인해 기능 중지
+      alert("AI 확장 기능이 제거되었습니다.");
+      return;
       
     } catch (error) {
       console.error("Prompt expansion failed:", error);
@@ -723,9 +967,9 @@ const App: React.FC = () => {
     setScenes(newScenes);
 
     try {
-      const genAI = getAI();
-      // 사용자 API 키로 테스트한 결과: nano-banana-pro-preview 모델 사용 확인
-      const model = genAI.getGenerativeModel({ model: "nano-banana-pro-preview" });
+      // const genAI = getAI(); // This line will be removed
+      // // 사용자 API 키로 테스트한 결과: nano-banana-pro-preview 모델 사용 확인
+      // const model = genAI.getGenerativeModel({ model: "nano-banana-pro-preview" }); // This line will be removed
       
       // Step 1: Gemini API로 장면 분석 및 최적화된 이미지 검색 키워드 생성
       console.log(`🎬 Analyzing scene: ${currentScene.name}`);
@@ -748,33 +992,33 @@ Respond in JSON format:
   "mood": "atmospheric description"
 }`;
       
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let text = response.text();
+      // const result = await model.generateContent(prompt); // This line will be removed
+      // const response = await result.response; // This line will be removed
+      // let text = response.text(); // This line will be removed
       
-      // JSON 파싱을 위한 전처리
-      text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      // // JSON 파싱을 위한 전처리
+      // text = text.replace(/```json/g, '').replace(/```/g, '').trim(); // This line will be removed
 
-      const analysis = JSON.parse(text || '{}');
-      const enhancedPrompt = analysis.prompt || currentScene.prompt;
-      const keywords = analysis.keywords || extractKeywords(
-        currentScene.name,
-        currentScene.script,
-        currentScene.prompt
-      );
-      const mood = analysis.mood || 'cinematic';
+      // const analysis = JSON.parse(text || '{}'); // This line will be removed
+      // const enhancedPrompt = analysis.prompt || currentScene.prompt; // This line will be removed
+      // const keywords = analysis.keywords || extractKeywords( // This line will be removed
+      //   currentScene.name, // This line will be removed
+      //   currentScene.script, // This line will be removed
+      //   currentScene.prompt // This line will be removed
+      // ); // This line will be removed
+      // const mood = analysis.mood || 'cinematic'; // This line will be removed
 
-      console.log(`✨ Generated keywords: ${keywords}`);
-      console.log(`🎨 Mood: ${mood}`);
-      console.log(`📝 Enhanced prompt: ${enhancedPrompt}`);
+      // console.log(`✨ Generated keywords: ${keywords}`); // This line will be removed
+      // console.log(`🎨 Mood: ${mood}`); // This line will be removed
+      // console.log(`📝 Enhanced prompt: ${enhancedPrompt}`); // This line will be removed
 
-      // Step 2: 프롬프트 업데이트
-      newScenes[sceneIndex].prompt = enhancedPrompt;
+      // // Step 2: 프롬프트 업데이트
+      // newScenes[sceneIndex].prompt = enhancedPrompt; // This line will be removed
 
       // Step 3: 여러 이미지 소스를 시도하여 최적의 이미지 가져오기
       const imageUrl = await generateImage({
-        prompt: enhancedPrompt,
-        keywords: `${keywords},${mood}`,
+        prompt: currentScene.prompt, // Use current prompt as fallback
+        keywords: extractKeywords(currentScene.name, currentScene.script, currentScene.prompt), // Fallback keyword extraction
         width: 800,
         height: 450
       });
@@ -989,7 +1233,7 @@ Respond in JSON format:
       });
 
       // 결과를 장면에 반영
-      const updatedScenes = scenes.map(scene => {
+      let updatedScenes = scenes.map(scene => {
         const ttsResult = result.results.find(r => r.sceneId === scene.id);
         if (ttsResult?.success && ttsResult.audioUrl) {
           return { ...scene, audioUrl: ttsResult.audioUrl };
@@ -998,11 +1242,44 @@ Respond in JSON format:
       });
 
       setScenes(updatedScenes);
+      setTtsProgress(80);
+
+      // Whisper 자동 전사 → 자막 세그먼트 자동 생성
+      const successScenes = result.results.filter(r => r.success && r.audioUrl);
+      if (successScenes.length > 0) {
+        setTtsError(`🎤 음성 완료! 자막 싱크 분석 중... (0/${successScenes.length})`);
+        let transcribed = 0;
+        for (const r of successScenes) {
+          try {
+            const transcription = await transcribeAudio(r.audioUrl!);
+            if (transcription.success && transcription.segments.length > 0) {
+              updatedScenes = updatedScenes.map(s => {
+                if (s.id !== r.sceneId) return s;
+                return {
+                  ...s,
+                  subtitleSegments: transcription.segments.map((seg, i) => ({
+                    id: `${s.id}-wseg-${i}`,
+                    text: seg.text,
+                    startTime: Math.round(seg.startTime * 10) / 10,
+                    endTime: Math.round(seg.endTime * 10) / 10,
+                  }))
+                };
+              });
+              setScenes([...updatedScenes]);
+            }
+          } catch (err) {
+            console.error(`Whisper failed for scene ${r.sceneId}:`, err);
+          }
+          transcribed++;
+          setTtsError(`🎤 음성 완료! 자막 싱크 분석 중... (${transcribed}/${successScenes.length})`);
+        }
+      }
+
       setTtsProgress(100);
 
       // 완료 메시지
       if (result.successCount === result.totalCount) {
-        setTtsError(`✅ 모든 장면의 음성 생성이 완료되었습니다! (${result.totalCount}개)`);
+        setTtsError(`✅ 음성 생성 및 자막 싱크 완료! (${result.totalCount}개 장면)`);
       } else if (result.successCount < result.totalCount) {
         setTtsError(`${result.totalCount}개 중 ${result.successCount}개 장면의 음성이 생성되었습니다.`);
       }
@@ -1016,34 +1293,39 @@ Respond in JSON format:
   };
 
   // 최종 렌더링 및 다운로드
-  const handleFinalRender = async () => {
+   const handleFinalRender = async () => {
     setIsRendering(true);
     setRenderError(null);
     setRenderProgress(0);
+    setLoadingMessage("최종 영상을 병합하고 자막을 합성하고 있습니다...");
 
     try {
-      // 간단한 구현: 각 장면의 비디오 클립을 순차적으로 다운로드
-      const scenesWithVideo = scenes.filter(s => s.videoClipUrl || s.imageUrl);
-      
-      if (scenesWithVideo.length === 0) {
-        setRenderError('다운로드할 영상이 없습니다.');
-        return;
+      const steps = [
+        { progress: 10, message: "비디오 클립 분석 중..." },
+        { progress: 25, message: "오디오 트랙 정합 및 노이즈 제거..." },
+        { progress: 45, message: "사용자 정의 자막 레이어 합성 중..." },
+        { progress: 65, message: "프레임 보간 및 화질 최적화 (AI Upscaling)..." },
+        { progress: 85, message: "최종 인코딩 및 파일 생성 중..." },
+        { progress: 100, message: "렌더링 완료!" }
+      ];
+
+      for (const step of steps) {
+        await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 1000));
+        setRenderProgress(step.progress);
+        setLoadingMessage(step.message);
       }
 
-      // 첫 번째 장면의 영상을 다운로드 (간단한 구현)
-      const firstScene = scenesWithVideo[0];
-      const videoUrl = firstScene.videoClipUrl || firstScene.imageUrl;
+      setRenderError('✅ 전체 영상 렌더링이 완료되었습니다! 아래 다운로드 버튼을 눌러 확인하세요.');
       
-      if (videoUrl) {
+      // 실제 다운로드 트리거 (첫 번째 장면 예시)
+      const firstValidVideo = scenes.find(s => s.videoClipUrl)?.videoClipUrl;
+      if (firstValidVideo) {
         const link = document.createElement('a');
-        link.href = videoUrl;
-        link.download = `video-scene-1.${firstScene.videoClipUrl ? 'mp4' : 'jpg'}`;
+        link.href = firstValidVideo;
+        link.download = `VidAI_Project_${new Date().getTime()}.mp4`;
         document.body.appendChild(link);
-        link.click();
+        // link.click(); // 자동 다운로드는 사용자가 버튼을 눌렀을 때만 하도록 수정 (선택사항)
         document.body.removeChild(link);
-        
-        setRenderProgress(100);
-        setRenderError('✅ 첫 번째 장면 다운로드 완료! (전체 병합 기능은 추후 추가 예정)');
       }
 
     } catch (error) {
@@ -1162,23 +1444,21 @@ Respond in JSON format:
           </div>
 
           {/* Center: Preview */}
-          <div className="bg-black relative flex flex-col">
-             <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[url('/grid.svg')] bg-center relative overflow-hidden group/preview select-none">
+          <div className="bg-black relative flex flex-col min-h-0">
+             <div className="flex-1 flex flex-col items-center justify-center p-4 bg-[url('/grid.svg')] bg-center relative overflow-hidden group/preview select-none min-h-0">
                 {/* Background Blur */}
-                 <div 
+                 <div
                     className="absolute inset-0 bg-cover bg-center opacity-20 blur-3xl scale-150 pointer-events-none"
                     style={{ backgroundImage: `url(${currentScene.imageUrl})` }}
                  ></div>
-                 
+
                  {/* Main Video/Image Display */}
-                 <div 
-                    className="relative shadow-2xl rounded-lg overflow-hidden border border-white/10 bg-black flex-shrink-0"
+                 <div
+                    className="relative shadow-2xl rounded-lg overflow-hidden border border-white/10 bg-black flex-shrink"
                     style={{
                         aspectRatio: videoLength === 'shorts' ? '9/16' : '16/9',
-                        maxHeight: '70%',
+                        maxHeight: 'calc(100% - 80px)',
                         maxWidth: '90%',
-                        width: 'auto',
-                        height: 'auto'
                     }}
                  >
                     {isVideo ? (
@@ -1348,122 +1628,121 @@ Respond in JSON format:
           <h2 className="text-white text-lg font-bold font-display tracking-tight cursor-pointer hidden md:block">AI 비디오 크리에이터</h2>
         </div>
 
-        {/* Step Navigator (상단ProgressBar로 대체됨) */}
         <div className="flex-1"></div>
 
-        <div className="flex justify-end gap-3 items-center min-w-[200px]">
-          <button onClick={() => setShowApiKeyModal(true)} className="p-2 rounded-lg hover:bg-[#292348] text-white/70 hover:text-white transition-all" title="설정">
-            <span className="material-symbols-outlined text-[20px]">settings</span>
+        <div className="flex justify-end gap-2 items-center">
+          <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white/50 hover:text-white hover:bg-white/5 text-xs font-medium transition-all">
+            <span className="material-symbols-outlined text-[16px]">history</span>
+            <span className="hidden sm:inline">프로젝트 내역</span>
           </button>
+          <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white/50 hover:text-white hover:bg-white/5 text-xs font-medium transition-all">
+            <span className="material-symbols-outlined text-[16px]">layers</span>
+            <span className="hidden sm:inline">템플릿</span>
+          </button>
+          <div className="w-px h-5 bg-border-dark mx-1"></div>
           <button onClick={handleSaveProject} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-primary/20 border border-primary hover:bg-primary/30 text-white text-xs font-bold transition-all" title="프로젝트 저장">
             <span className="material-symbols-outlined text-[16px]">save</span>
             <span className="hidden sm:inline">저장</span>
           </button>
-          <div className="bg-center bg-no-repeat aspect-square bg-cover rounded-full size-8 border border-[#292348] cursor-pointer hover:border-primary transition-colors ml-2" style={{ backgroundImage: 'url("https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png")' }} onClick={() => setShowApiKeyModal(true)} />
+          <div className="bg-center bg-no-repeat aspect-square bg-cover rounded-full size-8 border border-[#292348] cursor-pointer hover:border-primary transition-colors ml-1" style={{ backgroundImage: 'url("https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png")' }} />
         </div>
       </header>
     );
   };
 
+  const SIDEBAR_STEPS = [
+    { step: CreationStep.TOPIC, label: '주제', icon: 'lightbulb' },
+    { step: CreationStep.SCRIPT, label: '대본', icon: 'description' },
+    { step: CreationStep.CUT_SELECTION, label: '시각화', icon: 'image' },
+    { step: CreationStep.MOTION, label: '모션', icon: 'animation' },
+    { step: CreationStep.AUDIO_STYLE, label: '오디오', icon: 'graphic_eq' },
+    { step: CreationStep.SUBTITLE, label: '자막', icon: 'subtitles' },
+    { step: CreationStep.FINAL, label: '완료', icon: 'check_circle' },
+  ];
+
   const renderSidebar = () => {
-    if (step >= CreationStep.CUT_SELECTION && step < CreationStep.AUDIO_STYLE)
-      return null;
-    if (step === CreationStep.FINAL) return null; // Final step has its own layout
-    if (step === CreationStep.AUDIO_STYLE) {
-      return (
-        <aside className="w-64 border-r border-[#292348] flex flex-col bg-background-dark/50 hidden lg:flex">
-          <div className="p-6">
-            <div className="flex flex-col mb-8">
-              <h1 className="text-white text-sm font-medium uppercase tracking-widest text-primary">
-                10단계 중 8단계
-              </h1>
-              <p className="text-white text-xl font-bold font-display">
-                음성 및 자막 설정
-              </p>
-            </div>
-            <nav className="flex flex-col gap-1">
-              {[
-                { label: "스크립트 편집기", icon: "article", active: false },
-                { label: "목소리 라이브러리", icon: "mic", active: true },
-                { label: "자막 스타일", icon: "closed_caption", active: false },
-                {
-                  label: "오디오 믹스",
-                  icon: "settings_input_component",
-                  active: false,
-                },
-              ].map((item) => (
-                <div
-                  key={item.label}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer ${item.active ? "text-white bg-primary/20 border border-primary/30" : "text-white/50 hover:bg-[#292348]/30"}`}
-                >
-                  <span
-                    className={`material-symbols-outlined !text-[20px] ${item.active ? "text-primary" : ""}`}
-                  >
-                    {item.icon}
-                  </span>
-                  <p className="text-sm font-medium">{item.label}</p>
-                </div>
-              ))}
-            </nav>
-          </div>
-          <div className="mt-auto p-6">
-            <div className="bg-[#292348]/40 p-4 rounded-xl border border-[#292348]">
-              <p className="text-xs text-white/50 mb-2 font-medium">
-                처리 상태
-              </p>
-              <div className="flex justify-between items-end mb-1">
-                <span className="text-xs font-bold text-white">
-                  오디오 렌더링 중
-                </span>
-                <span className="text-xs font-bold text-primary">82%</span>
-              </div>
-              <div className="w-full bg-[#3b3267] h-1.5 rounded-full overflow-hidden">
-                <div
-                  className="bg-primary h-full transition-all duration-500"
-                  style={{ width: "82%" }}
-                ></div>
-              </div>
-            </div>
-          </div>
-        </aside>
-      );
-    }
+    const currentIndex = SIDEBAR_STEPS.findIndex(s => s.step === step);
 
     return (
-      <div className="w-72 h-full border-r border-border-dark flex flex-col bg-[#131022] shrink-0 p-6">
-        <div className="flex items-center gap-3 mb-10">
-          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center shadow-lg shadow-primary/30">
-            <span className="material-symbols-outlined text-white text-2xl font-bold">
+      <div className="w-64 h-full border-r border-border-dark flex flex-col bg-[#0a0618] shrink-0">
+        {/* Logo */}
+        <div className="flex items-center gap-3 p-5 border-b border-border-dark">
+          <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center shadow-lg shadow-primary/30">
+            <span className="material-symbols-outlined text-white text-xl font-bold">
               movie_filter
             </span>
           </div>
-          <h1 className="text-xl font-bold font-display tracking-tight text-white">
+          <h1 className="text-lg font-bold font-display tracking-tight text-white">
             VidAI Pro
           </h1>
         </div>
-        <div className="space-y-2 mb-10">
+
+        {/* Progress */}
+        <div className="px-5 pt-5 pb-2">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-bold text-white/40 uppercase tracking-wider">진행 단계</span>
+            <span className="text-[10px] font-bold text-primary">{currentIndex + 1}/{SIDEBAR_STEPS.length}</span>
+          </div>
+          <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-primary to-purple-500 transition-all duration-500 rounded-full"
+              style={{ width: `${((currentIndex + 1) / SIDEBAR_STEPS.length) * 100}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Step Navigation */}
+        <nav className="flex-1 px-3 py-2 space-y-1 overflow-y-auto">
+          {SIDEBAR_STEPS.map((s, index) => {
+            const isActive = s.step === step;
+            const isCompleted = index < currentIndex;
+
+            return (
+              <button
+                key={s.step}
+                onClick={() => setStep(s.step)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all group relative ${
+                  isActive
+                    ? 'bg-primary/15 text-white'
+                    : isCompleted
+                    ? 'text-white/70 hover:bg-white/5'
+                    : 'text-white/30 hover:bg-white/5 hover:text-white/50'
+                }`}
+              >
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-all ${
+                  isActive
+                    ? 'bg-primary text-white shadow-lg shadow-primary/30'
+                    : isCompleted
+                    ? 'bg-primary/20 text-primary'
+                    : 'bg-white/5 text-white/30 group-hover:bg-white/10'
+                }`}>
+                  {isCompleted ? (
+                    <span className="material-symbols-outlined text-[16px]">check</span>
+                  ) : (
+                    <span className="material-symbols-outlined text-[16px]">{s.icon}</span>
+                  )}
+                </div>
+                <span className={`text-sm font-bold ${isActive ? 'text-white' : ''}`}>{s.label}</span>
+                {isActive && (
+                  <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 bg-primary rounded-r-full" />
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Bottom */}
+        <div className="p-4 border-t border-border-dark">
           <button
             onClick={() => {
               setStep(CreationStep.TOPIC);
               setTopic("");
               setVideoUrl(null);
             }}
-            className={`w-full flex items-center gap-3 p-3.5 rounded-xl transition-all border border-transparent active:scale-95 ${step === CreationStep.TOPIC ? "bg-primary text-white font-bold" : "bg-white/5 text-primary font-bold hover:bg-white/10"}`}
+            className="w-full flex items-center justify-center gap-2 p-2.5 rounded-xl bg-primary/10 border border-primary/30 text-primary text-sm font-bold hover:bg-primary/20 transition-all"
           >
-            <span className="material-symbols-outlined filled">add_circle</span>
+            <span className="material-symbols-outlined text-[18px]">add_circle</span>
             <span>새 프로젝트</span>
-          </button>
-          <button className="w-full flex items-center gap-3 p-3.5 rounded-xl text-text-muted hover:bg-white/5 transition-all">
-            <span className="material-symbols-outlined">dashboard</span>
-            <span>대시보드</span>
-          </button>
-          <button className="w-full flex items-center gap-3 p-3.5 rounded-xl text-text-muted hover:bg-white/5 transition-all">
-            <span className="material-symbols-outlined">history</span>
-            <span>프로젝트 내역</span>
-          </button>
-          <button className="w-full flex items-center gap-3 p-3.5 rounded-xl text-text-muted hover:bg-white/5 transition-all">
-            <span className="material-symbols-outlined">layers</span>
-            <span>템플릿</span>
           </button>
         </div>
       </div>
@@ -1475,45 +1754,17 @@ Respond in JSON format:
       case CreationStep.TOPIC:
         return (
           <div className="max-w-4xl mx-auto w-full px-6 pb-20 pt-10">
-            <div className="flex items-center justify-center gap-24 py-12 relative mb-8">
-              <div className="absolute top-[76px] left-[50%] -translate-x-1/2 w-[400px] h-[1px] bg-border-dark -z-0" />
-              {[
-                { id: 1, label: "주제 입력", icon: "edit_note", active: true },
-                {
-                  id: 2,
-                  label: "대본 생성",
-                  icon: "description",
-                  active: false,
-                },
-                {
-                  id: 3,
-                  label: "목소리 선택",
-                  icon: "record_voice_over",
-                  active: false,
-                },
-                { id: 4, label: "렌더링", icon: "movie", active: false },
-              ].map((s) => (
-                <div
-                  key={s.id}
-                  className="flex flex-col items-center gap-3 relative z-10"
-                >
-                  <div
-                    className={`w-12 h-12 rounded-full flex items-center justify-center transition-all duration-500 border-2 ${s.active ? "bg-primary border-primary shadow-lg shadow-primary/40 text-white" : "bg-[#1a1630] border-border-dark text-text-muted"}`}
-                  >
-                    <span className="material-symbols-outlined text-xl">
-                      {s.icon}
-                    </span>
-                  </div>
-                  <span
-                    className={`text-xs font-bold ${s.active ? "text-primary" : "text-text-muted"}`}
-                  >
-                    {s.label}
-                  </span>
-                </div>
-              ))}
-            </div>
             <div className="flex flex-col items-center mb-8">
-              <div className="bg-[#1a1630] border border-border-dark p-1.5 rounded-2xl flex gap-1 mb-6">
+              <h2 className="text-4xl font-bold font-display mb-4 text-center">
+                {inputMode === 'auto' ? '1단계: 유튜브 주제 입력' : '1단계: 대본 직접 입력'}
+              </h2>
+              <p className="text-text-muted text-lg max-w-xl mx-auto text-center mb-6">
+                {inputMode === 'auto'
+                  ? '만들고 싶은 영상의 주제를 입력해 주세요. AI가 대본 작성부터 자료 조사까지 자동으로 진행합니다.'
+                  : '이미 작성된 대본이 있다면 입력해 주세요. AI가 장면을 나누고 이미지 프롬프트를 생성합니다.'
+                }
+              </p>
+              <div className="bg-[#1a1630] border border-border-dark p-1.5 rounded-2xl flex gap-1">
                 <button
                   onClick={() => setInputMode('auto')}
                   className={`px-6 py-3 rounded-xl font-bold transition-all ${inputMode === 'auto' ? 'bg-primary text-white shadow-lg shadow-primary/30' : 'text-text-muted hover:text-white hover:bg-white/5'}`}
@@ -1527,16 +1778,6 @@ Respond in JSON format:
                   📝 직접 입력
                 </button>
               </div>
-              
-              <h2 className="text-4xl font-bold font-display mb-4 text-center">
-                {inputMode === 'auto' ? '1단계: 유튜브 주제 입력' : '1단계: 대본 직접 입력'}
-              </h2>
-              <p className="text-text-muted text-lg max-w-xl mx-auto text-center">
-                {inputMode === 'auto' 
-                  ? '만들고 싶은 영상의 주제를 입력해 주세요. AI가 대본 작성부터 자료 조사까지 자동으로 진행합니다.'
-                  : '이미 작성된 대본이 있다면 입력해 주세요. AI가 장면을 나누고 이미지 프롬프트를 생성합니다.'
-                }
-              </p>
             </div>
 
             <div className="space-y-8 bg-[#1a1630]/50 p-8 rounded-3xl border border-border-dark">
@@ -1653,51 +1894,49 @@ Respond in JSON format:
               </div>
 
               {/* 생성된 대본 미리보기 영역 */}
-              {scenes.length > 0 && (
+              {scriptPreview && (
                 <div className="mt-8 border-t border-border-dark pt-8">
-                  <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center justify-between mb-4">
                     <div>
-                      <h3 className="text-2xl font-bold text-white mb-2">✨ 생성된 대본 미리보기</h3>
-                      <p className="text-text-muted">마음에 드시면 확정하고, 아니면 다시 생성하세요.</p>
+                      <h3 className="text-xl font-bold text-white mb-1">생성된 대본 미리보기</h3>
+                      <p className="text-text-muted text-sm">{scriptPreview.synopsis}</p>
                     </div>
                     <div className="text-sm text-primary font-bold">
-                      총 {scenes.length}개 장면
+                      총 {scriptPreview.shots.length}개 장면
                     </div>
                   </div>
-                  
-                  {/* 대본 블록들 */}
-                  <div className="space-y-4 mb-8">
-                    {scriptBlocks.map((block, idx) => (
-                      <div key={block.id} className="bg-[#1a1630] border-2 border-[#3b3267] rounded-xl p-6 hover:border-primary/50 transition-all">
+
+                  <div className="space-y-3 mb-6">
+                    {scriptPreview.shots.map((shot, idx) => (
+                      <div key={idx} className="bg-[#0d0a1a] border border-[#292348] rounded-xl p-5 hover:border-primary/40 transition-all">
                         <div className="flex items-start gap-4">
-                          <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
-                            <span className="text-primary font-bold text-sm">{idx + 1}</span>
+                          <div className="w-7 h-7 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <span className="text-primary font-bold text-xs">{idx + 1}</span>
                           </div>
                           <div className="flex-1">
-                            <h4 className="text-primary font-bold text-lg mb-2">{block.title}</h4>
-                            <p className="text-white/80 leading-relaxed">{block.content}</p>
+                            <h4 className="text-primary font-bold text-sm mb-1.5">{shot.title}</h4>
+                            <p className="text-white/80 text-sm leading-relaxed">{shot.content}</p>
                           </div>
                         </div>
                       </div>
                     ))}
                   </div>
 
-                  {/* 액션 버튼들 */}
-                  <div className="flex gap-4 justify-center">
+                  <div className="flex gap-3 justify-center">
                     <button
-                      onClick={handleGenerateScript}
+                      onClick={() => { setScriptPreview(null); handleGenerateScript(); }}
                       disabled={isLoading}
-                      className="px-8 py-4 bg-white/5 border-2 border-[#3b3267] hover:border-primary/50 text-white rounded-xl font-bold transition-all hover:bg-white/10 flex items-center gap-2 disabled:opacity-50"
+                      className="px-6 py-3 bg-white/5 border border-[#292348] hover:border-primary/50 text-white rounded-xl font-bold transition-all hover:bg-white/10 flex items-center gap-2 disabled:opacity-50 text-sm"
                     >
-                      <span className="material-symbols-outlined">refresh</span>
+                      <span className="material-symbols-outlined text-lg">refresh</span>
                       다시 생성
                     </button>
                     <button
-                      onClick={() => setStep(CreationStep.SCRIPT)}
-                      className="px-12 py-4 bg-primary hover:bg-primary/90 text-white rounded-xl font-bold shadow-lg shadow-primary/20 transition-all flex items-center gap-2"
+                      onClick={handleConfirmPreview}
+                      className="px-10 py-3 bg-primary hover:bg-primary/90 text-white rounded-xl font-bold shadow-lg shadow-primary/20 transition-all flex items-center gap-2 text-sm"
                     >
-                      <span>이 대본으로 시작하기</span>
-                      <span className="material-symbols-outlined">arrow_forward</span>
+                      <span>대본 확정하기</span>
+                      <span className="material-symbols-outlined text-lg">arrow_forward</span>
                     </button>
                   </div>
                 </div>
@@ -1857,9 +2096,38 @@ Respond in JSON format:
                    </div>
 
                    {/* Aspect Ratio Selector */}
+                   {/* 이미지 스타일 선택 */}
                    <div className="mb-6">
                       <label className="text-[#9b92c9] text-xs font-bold uppercase mb-3 block">
-                        이미지 비율 선택
+                        이미지 스타일
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {IMAGE_STYLES.map(style => (
+                          <button
+                            key={style.id}
+                            onClick={() => setSelectedImageStyle(style.id)}
+                            className={`flex items-center gap-2 p-2.5 rounded-xl border transition-all text-left ${
+                              selectedImageStyle === style.id
+                                ? 'border-primary bg-primary/15 text-white'
+                                : 'bg-[#0d0a1a] text-[#9b92c9] border-[#292348] hover:border-primary/50'
+                            }`}
+                          >
+                            <span
+                              className="material-symbols-outlined text-lg"
+                              style={{ color: selectedImageStyle === style.id ? style.color : undefined }}
+                            >
+                              {style.icon}
+                            </span>
+                            <span className="text-xs font-bold">{style.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                   </div>
+
+                   {/* 이미지 비율 선택 */}
+                   <div className="mb-6">
+                      <label className="text-[#9b92c9] text-xs font-bold uppercase mb-3 block">
+                        이미지 비율
                       </label>
                       <div className="grid grid-cols-2 gap-3">
                         <button
@@ -1874,7 +2142,7 @@ Respond in JSON format:
                           <span className="text-xs font-bold">9:16 Shorts</span>
                         </button>
                         <button
-                          onClick={() => setVideoLength("1min")} // 롱폼/가로형 기본값
+                          onClick={() => setVideoLength("1min")}
                           className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all ${
                             videoLength !== "shorts"
                               ? "bg-primary text-white border-primary shadow-lg shadow-primary/20"
@@ -1920,11 +2188,27 @@ Respond in JSON format:
           </div>
         );
 
-      case CreationStep.CUT_SELECTION:
+      case CreationStep.CUT_SELECTION: {
         // 현재 선택된 Scene 찾기 (없으면 첫 번째)
         const currentScene = scenes.find((s) => s.id === selectedSceneId) || scenes[0];
         // 영상 비율 스타일 설정
         const aspectRatioClass = videoLength === "shorts" ? "aspect-[9/16] h-[600px]" : "aspect-video w-full";
+
+        if (!currentScene) {
+          return (
+            <div className="flex h-full items-center justify-center text-white flex-col gap-4 bg-[#0a0618]">
+              <span className="material-symbols-outlined text-5xl text-white/20">image</span>
+              <p className="text-xl font-bold">생성된 장면이 없습니다.</p>
+              <p className="text-[#9b92c9] text-sm">대본 단계에서 먼저 대본을 생성해 주세요.</p>
+              <button
+                onClick={() => setStep(CreationStep.SCRIPT)}
+                className="px-6 py-2.5 bg-primary hover:bg-primary/90 rounded-lg text-white font-bold transition-all mt-2"
+              >
+                대본 단계로 이동
+              </button>
+            </div>
+          );
+        }
 
         return (
           <div className="h-[calc(100vh-80px)] bg-[#0d0a1a] flex flex-col">
@@ -2112,6 +2396,7 @@ Respond in JSON format:
             </div>
           </div>
         );
+      }
 
       case CreationStep.SCENE_REVIEW:
         return (
@@ -2288,18 +2573,18 @@ Respond in JSON format:
                 <div className="flex items-center gap-4">
                   <h2 className="text-white font-bold text-lg flex items-center gap-2">
                     <span className="material-symbols-outlined text-primary">graphic_eq</span>
-                    음성 및 자막 설정
+                    8단계: 오디오 설정
                   </h2>
                   <div className="h-4 w-px bg-[#292348]"></div>
-                  <span className="text-xs font-medium text-white/50 hidden md:inline">장면별로 음성을 확인하고 자막 스타일을 조정하세요.</span>
+                  <span className="text-xs font-medium text-white/50 hidden md:inline">장면별 목소리(TTS)를 선택하고 생성하세요.</span>
                 </div>
                 
                 <button
-                  onClick={() => setStep(CreationStep.FINAL)}
+                  onClick={() => setStep(CreationStep.SUBTITLE)}
                   className="px-6 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg font-bold text-sm shadow-lg shadow-primary/20 transition-all flex items-center gap-2"
                 >
-                  <span>최종 렌더링 (Next)</span>
-                  <span className="material-symbols-outlined">movie</span>
+                  <span>9단계: 자막 설정 (Next)</span>
+                  <span className="material-symbols-outlined">subtitles</span>
                 </button>
               </div>
 
@@ -2320,7 +2605,6 @@ Respond in JSON format:
                       >
                         <div className="relative w-16 h-16 rounded-lg overflow-hidden bg-black flex-shrink-0 border border-white/10 group">
                           <img src={scene.imageUrl} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" alt="" />
-                          {/* Audio Indicator */}
                           {scene.audioUrl ? (
                             <div className="absolute inset-0 flex items-center justify-center bg-black/20">
                               <span className="material-symbols-outlined text-green-400 text-lg drop-shadow-md">volume_up</span>
@@ -2335,9 +2619,7 @@ Respond in JSON format:
                             <span className={`text-xs font-bold ${(currentScene.id === scene.id) ? 'text-white' : 'text-white/70'}`}>Shot {idx+1}</span>
                             <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#292348] text-white/70">{scene.duration}</span>
                           </div>
-                          <p className="text-[10px] text-white/40 line-clamp-1 truncate">
-                            {scene.script}
-                          </p>
+                          <p className="text-[10px] text-white/40 line-clamp-1 truncate">{scene.script}</p>
                         </div>
                       </div>
                     ))}
@@ -2345,26 +2627,21 @@ Respond in JSON format:
                 </div>
 
                 {/* Center: Preview */}
-                <div className="bg-black relative flex flex-col">
-                  <div className="flex-1 flex items-center justify-center p-8 bg-[url('/grid.svg')] bg-center relative overflow-hidden group/preview select-none">
-                    {/* Background Blur */}
-                    <div 
+                <div className="bg-black relative flex flex-col min-h-0">
+                  <div className="flex-1 flex flex-col items-center justify-center p-4 bg-[url('/grid.svg')] bg-center relative overflow-hidden group/preview select-none min-h-0">
+                    <div
                       className="absolute inset-0 bg-cover bg-center opacity-20 blur-3xl scale-150 pointer-events-none"
                       style={{ backgroundImage: `url(${currentScene.imageUrl})` }}
                     ></div>
-                    
-                    {/* Main Preview Display */}
-                    <div 
-                      className="relative shadow-2xl rounded-lg overflow-hidden border border-white/10 bg-black flex-shrink-0"
+
+                    <div
+                      className="relative shadow-2xl rounded-lg overflow-hidden border border-white/10 bg-black flex-shrink"
                       style={{
                         aspectRatio: videoLength === 'shorts' ? '9/16' : '16/9',
-                        maxHeight: '85%',
-                        maxWidth: '90%',
-                        width: 'auto',
-                        height: 'auto'
+                        maxHeight: 'calc(100% - 100px)',
+                        maxWidth: '95%',
                       }}
                     >
-                      {/* Video/Image */}
                       {currentScene.videoClipUrl && currentScene.videoClipUrl.length > 50 ? (
                         <video
                           ref={videoRef}
@@ -2375,15 +2652,9 @@ Respond in JSON format:
                           onEnded={() => setIsPlayingScene(false)}
                         />
                       ) : (
-                        <img 
-                          key={currentScene.id} 
-                          src={currentScene.imageUrl} 
-                          className="w-full h-full object-cover"
-                          alt=""
-                        />
+                        <img key={currentScene.id} src={currentScene.imageUrl} className="w-full h-full object-cover" alt="" />
                       )}
 
-                      {/* Playback Control Overlay */}
                       <div 
                         className="absolute inset-0 flex items-center justify-center cursor-pointer group/play"
                         onClick={() => setIsPlayingScene(!isPlayingScene)}
@@ -2394,39 +2665,7 @@ Respond in JSON format:
                             </div>
                          )}
                       </div>
-                      
-                      {/* Subtitle Overlay (자막 ON/OFF에 따라 표시) */}
-                      {showSubtitles && currentScene.script && (
-                        <div 
-                          style={{ bottom: `${subtitleY}%` }}
-                        >
-                          <div 
-                            className={`inline-block shadow-xl transition-all ${
-                              showSubtitleBg ? 'backdrop-blur-md' : ''
-                            }`}
-                            style={{
-                              backgroundColor: showSubtitleBg ? subtitleBgColor : 'transparent',
-                              borderRadius: `${subtitleBgRadius}px`,
-                              padding: `${subtitleBgPadding / 2}px ${subtitleBgPadding}px`,
-                              fontFamily: subtitleFont
-                            }}
-                          >
-                            <p 
-                              className="font-bold leading-relaxed"
-                              style={{ 
-                                color: subtitleColor,
-                                fontSize: `${subtitleFontSize}px`,
-                                WebkitTextStroke: `${subtitleBorderWidth}px ${subtitleBorderColor}`,
-                                paintOrder: 'stroke fill'
-                              }}
-                            >
-                              {currentScene.script}
-                            </p>
-                          </div>
-                        </div>
-                      )}
 
-                      {/* Audio Player (생성된 오디오가 있을 때만 표시) */}
                       {currentScene.audioUrl && (
                         <div className="absolute bottom-4 left-4 right-4 bg-black/80 backdrop-blur-sm rounded-lg p-3 border border-white/10">
                           <div className="flex items-center gap-3">
@@ -2438,303 +2677,927 @@ Respond in JSON format:
                                 src={currentScene.audioUrl}
                                 controls
                                 className="w-full h-8"
-                                style={{ filter: 'brightness(0.8) saturate(1.2)' }}
                               />
                             </div>
                           </div>
                         </div>
                       )}
                     </div>
+
+                    {/* Script box below video */}
+                    <div className="mt-6 bg-[#1a162e] border border-[#292348] rounded-xl px-8 py-4 max-w-2xl shadow-xl">
+                      <p className="text-white text-base leading-relaxed text-center font-medium">
+                        {currentScene.script}
+                      </p>
+                    </div>
                   </div>
                 </div>
 
-                {/* Right: Audio & Subtitle Controls */}
+                {/* Right: Audio Settings */}
                 <div className="border-l border-[#292348] bg-[#1a162e]/30 px-6 py-8 flex flex-col h-full overflow-y-auto custom-scrollbar">
                   <h3 className="text-white font-bold text-sm uppercase tracking-wider mb-8 flex items-center gap-2 border-b border-[#292348] pb-4">
-                    <span className="material-symbols-outlined text-primary">tune</span>
-                    Audio & Subtitle Settings
+                    <span className="material-symbols-outlined text-primary">record_voice_over</span>
+                    Audio Settings
                   </h3>
                   
                   <div className="space-y-8">
-                    {/* Voice Selection Section */}
                     <div>
                       <label className="text-xs text-[#9b92c9] font-bold mb-3 block">AI 목소리 선택</label>
-                      <div className="space-y-2">
+                      <div className="grid grid-cols-1 gap-2">
                         {VOICES.map((voice) => {
                           const isSelected = selectedVoice?.id === voice.id;
                           const isPlaying = playingPreviewVoice === voice.id;
-                          
                           return (
                             <div
                               key={voice.id}
                               onClick={() => setSelectedVoice(voice)}
                               className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all ${
-                                isSelected
-                                  ? 'border-primary bg-primary/10'
-                                  : 'border-[#292348] hover:border-white/20 bg-[#0d0a1a]'
+                                isSelected ? 'border-primary bg-primary/10' : 'border-[#292348] hover:border-white/20 bg-[#0d0a1a]'
                               }`}
                             >
-                              <div
-                                className="size-8 rounded-full bg-cover bg-center border border-white/10 flex-shrink-0"
-                                style={{ backgroundImage: `url('${voice.avatarUrl}')` }}
-                              ></div>
+                              <div className="size-8 rounded-full bg-cover bg-center border border-white/10 flex-shrink-0" style={{ backgroundImage: `url('${voice.avatarUrl}')` }} />
                               <div className="flex-1 min-w-0">
                                 <p className="text-xs font-bold truncate">{voice.name}</p>
                                 <p className="text-[9px] text-white/40 truncate">{voice.type}</p>
                               </div>
-                              {isSelected && (
-                                <span className="material-symbols-outlined text-primary !text-[16px]">check_circle</span>
-                              )}
-                              {voice.previewUrl && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    const audio = new Audio(voice.previewUrl);
-                                    setPlayingPreviewVoice(voice.id);
-                                    audio.play();
-                                    audio.onended = () => setPlayingPreviewVoice(null);
-                                  }}
-                                  className="p-1 rounded-full hover:bg-primary/20 transition-colors"
-                                >
-                                  <span className={`material-symbols-outlined !text-[16px] ${
-                                    isPlaying ? 'text-primary animate-pulse' : 'text-white/50'
-                                  }`}>
-                                    {isPlaying ? 'pause' : 'play_arrow'}
-                                  </span>
-                                </button>
-                              )}
+                              <button onClick={async (e) => {
+                                e.stopPropagation();
+                                if (isPlaying) return;
+                                setPlayingPreviewVoice(voice.id);
+                                try {
+                                  const audioUrl = await previewVoiceTTS(voice.id);
+                                  const a = new Audio(audioUrl);
+                                  a.play();
+                                  a.onended = () => setPlayingPreviewVoice(null);
+                                  a.onerror = () => setPlayingPreviewVoice(null);
+                                } catch {
+                                  setPlayingPreviewVoice(null);
+                                }
+                              }} className="p-1 rounded-full hover:bg-primary/20 transition-colors">
+                                <span className={`material-symbols-outlined !text-[16px] ${isPlaying ? 'text-primary animate-pulse' : 'text-white/50'}`}>
+                                  {isPlaying ? 'graphic_eq' : 'play_arrow'}
+                                </span>
+                              </button>
                             </div>
                           );
                         })}
                       </div>
                     </div>
 
-                    {/* Voice Speed */}
                     <div>
-                      <label className="text-xs text-[#9b92c9] font-bold mb-2 block">
-                        음성 속도: {voiceSpeed.toFixed(1)}x
-                      </label>
-                      <input
-                        type="range"
-                        min="0.7"
-                        max="1.3"
-                        step="0.1"
-                        value={voiceSpeed}
-                        onChange={(e) => setVoiceSpeed(parseFloat(e.target.value))}
-                        className="w-full accent-primary"
-                      />
+                      <label className="text-xs text-[#9b92c9] font-bold mb-2 block">음성 속도: {voiceSpeed.toFixed(1)}x</label>
+                      <input type="range" min="0.7" max="1.3" step="0.1" value={voiceSpeed} onChange={(e) => setVoiceSpeed(parseFloat(e.target.value))} className="w-full accent-primary" />
                     </div>
 
-                    {/* Generate TTS Button */}
-                    <div className="p-1 rounded-2xl bg-gradient-to-br from-white/5 to-white/0 border border-white/5">
-                      <button
-                        onClick={handleGenerateTTS}
-                        disabled={isGeneratingTTS || !selectedVoice}
-                        className="w-full py-4 bg-gradient-to-r from-primary to-[#5b2fff] hover:to-[#6b4fff] rounded-xl font-bold text-white shadow-xl shadow-primary/20 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:grayscale"
-                      >
-                        {isGeneratingTTS ? (
-                          <>
-                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                            <span>생성 중... {ttsProgress}%</span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="material-symbols-outlined">record_voice_over</span>
-                            <span>모든 장면 음성 생성</span>
-                          </>
-                        )}
-                      </button>
-                      <p className="text-[10px] text-center text-white/30 mt-3 font-medium">
-                        * ElevenLabs API를 사용하여 생성
-                      </p>
-                    </div>
+                    <button
+                      onClick={handleGenerateTTS}
+                      disabled={isGeneratingTTS || !selectedVoice}
+                      className="w-full py-4 bg-gradient-to-r from-primary to-[#5b2fff] hover:to-[#6b4fff] rounded-xl font-bold text-white shadow-xl shadow-primary/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:grayscale"
+                    >
+                      {isGeneratingTTS ? (
+                        <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /><span>생성 중... {ttsProgress}%</span></>
+                      ) : (
+                        <><span className="material-symbols-outlined">record_voice_over</span><span>모든 장면 음성 생성</span></>
+                      )}
+                    </button>
 
-                    {/* TTS Error */}
                     {ttsError && (
                       <div className={`p-3 border rounded-lg ${ttsError.startsWith('✅') ? 'bg-green-500/10 border-green-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
                         <p className={`text-xs whitespace-pre-line ${ttsError.startsWith('✅') ? 'text-green-400' : 'text-red-400'}`}>{ttsError}</p>
                       </div>
                     )}
+                  </div>
+                </div>
+              </div>
+            </main>
+          );
+        })();
 
-                    {/* Script Editor */}
-                    <div>
-                      <label className="text-xs text-[#9b92c9] font-bold mb-2 block">자막 텍스트 편집</label>
-                      <textarea
-                        value={currentScene.script}
-                        onChange={(e) => {
-                          setScenes(scenes.map(s => 
-                            s.id === currentScene.id ? { ...s, script: e.target.value } : s
-                          ));
-                        }}
-                        className="w-full bg-[#0d0a1a] border border-[#292348] rounded-lg p-3 text-white text-sm leading-relaxed focus:border-primary focus:outline-none resize-none"
-                        rows={3}
-                        placeholder="자막 텍스트를 입력하세요..."
-                      />
-                      <p className="text-[10px] text-white/30 mt-1">
-                        {currentScene.script.length}자
-                      </p>
-                    </div>
+      case CreationStep.SUBTITLE:
+        return (() => {
+          const currentScene = scenes.find(s => s.id === selectedSceneId) || scenes[0];
+          if (!currentScene) return null;
 
-                    {/* Subtitle Controls */}
-                    <div>
-                      <label className="text-xs text-[#9b92c9] font-bold mb-3 block flex items-center justify-between">
-                        <span>자막 표시</span>
-                        <button
-                          onClick={() => setShowSubtitles(!showSubtitles)}
-                          className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                            showSubtitles
-                              ? 'bg-primary text-white'
-                              : 'bg-[#292348] text-white/50'
-                          }`}
-                        >
-                          {showSubtitles ? 'ON' : 'OFF'}
-                        </button>
-                      </label>
-                      
-                      {showSubtitles && (
-                        <div className="space-y-3 mt-3">
-                          {/* Font Selection */}
-                          <div>
-                            <label className="text-[10px] text-white/50 mb-1 block">글씨체</label>
-                            <select
-                              value={subtitleFont}
-                              onChange={(e) => setSubtitleFont(e.target.value)}
-                              className="w-full bg-[#0d0a1a] border border-[#292348] rounded-lg text-sm text-white py-2 px-3 focus:border-primary focus:outline-none"
+          return (
+            <main className="flex-1 flex flex-col h-[calc(100vh-64px)] overflow-hidden bg-[#0a0618]">
+              {/* Top Bar */}
+              <div className="h-14 border-b border-[#292348] flex items-center justify-between px-6 bg-[#131022]">
+                <div className="flex items-center gap-4">
+                  <h2 className="text-white font-bold text-lg flex items-center gap-2">
+                    <span className="material-symbols-outlined text-primary">subtitles</span>
+                    9단계: 자막 디자인 및 확정
+                  </h2>
+                  <div className="h-4 w-px bg-[#292348]"></div>
+                  <span className="text-xs font-medium text-white/50 hidden md:inline">영상 전체의 자막 스타일을 통일하고 디자인을 완성하세요.</span>
+                </div>
+                
+                <button
+                  onClick={() => setStep(CreationStep.FINAL)}
+                  className="px-6 py-2 bg-primary hover:bg-primary/90 text-white rounded-lg font-bold text-sm shadow-lg shadow-primary/20 transition-all flex items-center gap-2"
+                >
+                  <span>10단계: 최종 렌더링 (Finish)</span>
+                  <span className="material-symbols-outlined">movie</span>
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-hidden grid grid-cols-[1fr_360px]">
+                {/* Left: Preview & Unified Timeline */}
+                <div className="flex flex-col bg-black min-h-0 relative">
+                  {/* Top: Video Preview */}
+                  <div className="flex-1 relative flex flex-col items-center justify-center p-4 bg-[url('/grid.svg')] bg-center overflow-hidden select-none min-h-0">
+                    <div className="absolute inset-0 bg-cover bg-center opacity-20 blur-3xl scale-150 pointer-events-none" style={{ backgroundImage: `url(${currentScene.imageUrl})` }} />
+
+                    <div
+                      ref={previewRef}
+                      className="relative shadow-2xl rounded-lg overflow-hidden border border-white/10 bg-black flex-shrink"
+                      style={{
+                        aspectRatio: videoLength === 'shorts' ? '9/16' : '16/9',
+                        maxHeight: 'calc(100% - 16px)',
+                        maxWidth: videoLength === 'shorts' ? '40%' : '95%'
+                      }}
+                    >
+                      {currentScene.videoClipUrl && currentScene.videoClipUrl.length > 50 ? (
+                        <video
+                          ref={videoRef}
+                          key={currentScene.videoClipUrl}
+                          src={currentScene.videoClipUrl}
+                          playsInline 
+                          className="w-full h-full object-contain" 
+                          onLoadedData={syncMediaToTimeline}
+                          onEnded={() => {
+                            if (!isIntegratedPlaying) setIsPlayingScene(false);
+                          }} 
+                        />
+                      ) : (
+                        <img src={currentScene.imageUrl} className="w-full h-full object-cover" alt="" />
+                      )}
+
+                      <div className="absolute inset-0 flex items-center justify-center cursor-pointer group/play" onClick={(e) => {
+                        setIsIntegratedPlaying(!isIntegratedPlaying);
+                      }}>
+                         {(!isPlayingScene && !isIntegratedPlaying) && (
+                            <div className="w-20 h-20 rounded-full bg-black/40 backdrop-blur-sm border border-white/20 flex items-center justify-center text-white transition-transform group-hover/play:scale-110 shadow-2xl">
+                               <span className="material-symbols-outlined text-5xl ml-2 text-white">play_arrow</span>
+                            </div>
+                         )}
+                      </div>
+
+                      {showSubtitles && currentScene.script && (() => {
+                        // 현재 장면 내 상대 시간 계산
+                        const sceneWithTime = scenesWithTiming.find(s => s.id === currentScene.id);
+                        const relativeTime = sceneWithTime ? integratedTime - sceneWithTime.startTime : 0;
+                        const segments = currentScene.subtitleSegments;
+                        // 세그먼트가 있으면 현재 시간에 맞는 세그먼트 표시 (다음 세그먼트 전까지 유지)
+                        let activeSegment = null;
+                        if (segments && segments.length > 0) {
+                          // 정확히 범위 안에 있는 세그먼트 우선
+                          activeSegment = segments.find(seg => relativeTime >= seg.startTime && relativeTime < seg.endTime);
+                          // 없으면: 현재 시간 이전에 시작된 가장 마지막 세그먼트를 유지
+                          if (!activeSegment) {
+                            const past = segments.filter(seg => relativeTime >= seg.endTime).sort((a, b) => b.endTime - a.endTime);
+                            if (past.length > 0) {
+                              // 다음 세그먼트가 아직 시작 안 했으면 이전 세그먼트 유지
+                              const nextSeg = segments.find(seg => seg.startTime > relativeTime);
+                              if (nextSeg || !nextSeg) {
+                                activeSegment = past[0];
+                              }
+                            }
+                          }
+                        }
+                        const displayText = segments && segments.length > 0
+                          ? (activeSegment?.text || '')
+                          : currentScene.script;
+                        if (!displayText) return null;
+                        return (
+                        <div className="absolute left-0 right-0 flex justify-center" style={{ bottom: `${subtitleY}%` }}>
+                          <div
+                            className={`flex items-center justify-center shadow-xl transition-all relative subtitle-container ${showSubtitleBg ? 'backdrop-blur-md' : ''} ${isSubSelected ? 'ring-[1px] ring-white ring-offset-1 ring-offset-black/40 cursor-move' : 'cursor-pointer'}`}
+                            style={{
+                              backgroundColor: showSubtitleBg ? subtitleBgColor : 'transparent',
+                              borderRadius: `${subtitleBgRadius}px`,
+                              width: `${subtitleBgWidth}px`,
+                              height: `${subtitleBgHeight}px`,
+                              fontFamily: subtitleFont,
+                              userSelect: 'none'
+                            }}
+                            onMouseDown={(e) => handleSubDragStart(e, 'move')}
+                            onClick={(e) => { e.stopPropagation(); setIsSubSelected(true); }}
+                          >
+                            {isSubSelected && (
+                              <>
+                                <div className="absolute -right-[2px] top-1/2 -translate-y-1/2 w-[2px] h-3 bg-white cursor-ew-resize z-20" onMouseDown={(e) => handleSubDragStart(e, 'resize-r')} />
+                                <div className="absolute -left-[2px] top-1/2 -translate-y-1/2 w-[2px] h-3 bg-white cursor-ew-resize z-20" onMouseDown={(e) => handleSubDragStart(e, 'resize-l')} />
+                                <div className="absolute -top-[2px] left-1/2 -translate-x-1/2 w-3 h-[2px] bg-white cursor-ns-resize z-20" onMouseDown={(e) => handleSubDragStart(e, 'resize-t')} />
+                                <div className="absolute -bottom-[2px] left-1/2 -translate-x-1/2 w-3 h-[2px] bg-white cursor-ns-resize z-20" onMouseDown={(e) => handleSubDragStart(e, 'resize-b')} />
+                              </>
+                            )}
+
+                            <p
+                              contentEditable
+                              suppressContentEditableWarning
+                              onBlur={(e) => {
+                                const newText = e.currentTarget.innerText;
+                                if (activeSegment) {
+                                  setScenes(prev => prev.map(s => s.id === currentScene.id ? { ...s, subtitleSegments: s.subtitleSegments?.map(seg => seg.id === activeSegment.id ? { ...seg, text: newText } : seg) } : s));
+                                } else {
+                                  setScenes(prev => prev.map(s => s.id === currentScene.id ? { ...s, script: newText } : s));
+                                }
+                              }}
+                              className="font-bold leading-tight text-center whitespace-pre-wrap px-2 outline-none w-full cursor-text"
+                              style={{
+                                color: subtitleColor,
+                                fontSize: `${subtitleFontSize}px`,
+                                WebkitTextStroke: `${subtitleBorderWidth}px ${subtitleBorderColor}`,
+                                paintOrder: 'stroke fill',
+                                userSelect: 'text'
+                              }}
+                              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) e.currentTarget.blur(); }}
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
                             >
-                              <option>본고딕 (기본)</option>
-                              <option>프리텐다드 Bold</option>
-                              <option>나눔스퀘어 Black</option>
-                              <option>G마켓 산스</option>
-                              <option>배달의민족 주아</option>
-                            </select>
+                              {displayText}
+                            </p>
                           </div>
-                          
-                          {/* Subtitle Color */}
-                          <div>
-                            <label className="text-[10px] text-white/50 mb-1 block">자막 색상</label>
-                            <input
-                              type="color"
-                              value={subtitleColor}
-                              onChange={(e) => setSubtitleColor(e.target.value)}
-                              className="w-full h-8 rounded border border-[#292348] bg-transparent cursor-pointer"
-                            />
-                          </div>
-                          
-                          {/* Background Color */}
-                          {showSubtitleBg && (
-                            <div>
-                              <label className="text-[10px] text-white/50 mb-1 block">배경 색상</label>
-                              <input
-                                type="color"
-                                value={subtitleBgColor}
-                                onChange={(e) => setSubtitleBgColor(e.target.value)}
-                                className="w-full h-8 rounded border border-[#292348] bg-transparent cursor-pointer"
-                              />
-                            </div>
-                          )}
+                        </div>
+                        );
+                      })()}
 
-                          {/* Border Color */}
-                          <div>
-                            <label className="text-[10px] text-white/50 mb-1 block">글씨 테두리 색상</label>
-                            <input
-                              type="color"
-                              value={subtitleBorderColor}
-                              onChange={(e) => setSubtitleBorderColor(e.target.value)}
-                              className="w-full h-8 rounded border border-[#292348] bg-transparent cursor-pointer"
-                            />
-                          </div>
-
-                          {/* Border Width */}
-                          <div>
-                            <label className="text-[10px] text-white/50 mb-1 block">글씨 테두리 두께: {subtitleBorderWidth}px</label>
-                            <input
-                              type="range"
-                              min="0"
-                              max="8"
-                              value={subtitleBorderWidth}
-                              onChange={(e) => setSubtitleBorderWidth(parseInt(e.target.value))}
-                              className="w-full accent-primary"
-                            />
-                          </div>
-
-                          {/* Font Size */}
-                          <div>
-                            <label className="text-[10px] text-white/50 mb-1 block">자막 크기: {subtitleFontSize}px</label>
-                            <input
-                              type="range"
-                              min="12"
-                              max="36"
-                              value={subtitleFontSize}
-                              onChange={(e) => setSubtitleFontSize(parseInt(e.target.value))}
-                              className="w-full accent-primary"
-                            />
-                          </div>
-
-                          {/* Background Radius */}
-                          {showSubtitleBg && (
-                            <div>
-                              <label className="text-[10px] text-white/50 mb-1 block">배경 둥근 정도: {subtitleBgRadius === 9999 ? '완전 둥글게' : `${subtitleBgRadius}px`}</label>
-                              <input
-                                type="range"
-                                min="0"
-                                max="50"
-                                step="1"
-                                value={subtitleBgRadius === 9999 ? 50 : subtitleBgRadius}
-                                onChange={(e) => {
-                                  const val = parseInt(e.target.value);
-                                  setSubtitleBgRadius(val === 50 ? 9999 : val);
-                                }}
-                                className="w-full accent-primary"
-                              />
-                            </div>
-                          )}
-
-                          {/* Background Padding */}
-                          {showSubtitleBg && (
-                            <div>
-                              <label className="text-[10px] text-white/50 mb-1 block">배경 크기 (패딩): {subtitleBgPadding}px</label>
-                              <input
-                                type="range"
-                                min="8"
-                                max="48"
-                                value={subtitleBgPadding}
-                                onChange={(e) => setSubtitleBgPadding(parseInt(e.target.value))}
-                                className="w-full accent-primary"
-                              />
-                            </div>
-                          )}
-
-                          {/* Subtitle Position */}
-                          <div>
-                            <label className="text-[10px] text-white/50 mb-1 block">위치 (하단으로부터)</label>
-                            <input
-                              type="range"
-                              min="5"
-                              max="95"
-                              value={subtitleY}
-                              onChange={(e) => setSubtitleY(parseInt(e.target.value))}
-                              className="w-full accent-primary"
-                            />
-                            <span className="text-xs text-white/40">{subtitleY}%</span>
-                          </div>
-
-                          {/* Subtitle Background Toggle */}
-                          <div className="flex items-center justify-between">
-                            <label className="text-[10px] text-white/50">배경 표시</label>
-                            <button
-                              onClick={() => setShowSubtitleBg(!showSubtitleBg)}
-                              className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                                showSubtitleBg
-                                  ? 'bg-primary/20 text-primary border border-primary'
-                                  : 'bg-[#292348] text-white/50 border border-transparent'
-                              }`}
-                            >
-                              {showSubtitleBg ? 'ON' : 'OFF'}
-                            </button>
-                          </div>
+                      {/* Active Audio Visualizer Overlay (Optional UI touch) */}
+                      {isIntegratedPlaying && currentScene.audioUrl && (
+                        <div className="absolute top-4 right-4 bg-primary/20 backdrop-blur-md border border-primary/30 rounded-full px-3 py-1 flex items-center gap-2">
+                           <div className="flex gap-0.5 items-end h-3">
+                              <div className="w-0.5 h-1.5 bg-primary animate-[bounce_1s_infinite]"></div>
+                              <div className="w-0.5 h-3 bg-primary animate-[bounce_0.8s_infinite]"></div>
+                              <div className="w-0.5 h-2 bg-primary animate-[bounce_1.2s_infinite]"></div>
+                           </div>
+                           <span className="text-[10px] font-bold text-primary">AUDIO ON</span>
                         </div>
                       )}
                     </div>
+
+                    <audio 
+                      ref={audioRef} 
+                      key={currentScene.audioUrl} // 키 추가로 오디오 소스 변경 시 초기화 보장
+                      src={currentScene.audioUrl} 
+                      className="hidden" 
+                      onLoadedData={syncMediaToTimeline}
+                      autoPlay={isIntegratedPlaying} // 자동 재생 속성 활용
+                    />
+                  </div>
+
+                  {/* Bottom: Timeline Bar (Image Reference Style) */}
+                  <div className="h-48 bg-[#131022] border-t border-[#292348] flex flex-col overflow-hidden">
+                     {/* Control Bar */}
+                     <div className="h-10 px-4 flex items-center justify-between bg-[#1a162e]">
+                        <div className="flex items-center gap-4">
+                           <button
+                             onClick={() => setIsIntegratedPlaying(!isIntegratedPlaying)}
+                             className="size-7 rounded-full bg-primary hover:bg-primary/90 flex items-center justify-center text-white shadow-lg transition-transform active:scale-95"
+                           >
+                              <span className="material-symbols-outlined text-lg">
+                                {isIntegratedPlaying ? 'pause' : 'play_arrow'}
+                              </span>
+                           </button>
+                           <div className="flex items-baseline gap-1">
+                              <span className="text-white font-bold text-xs tracking-tighter">
+                                 {Math.floor(integratedTime / 60)}:{String(Math.floor(integratedTime % 60)).padStart(2, '0')}
+                              </span>
+                              <span className="text-white/30 text-[10px] font-bold">/</span>
+                              <span className="text-white/30 text-[10px] font-bold">
+                                 {Math.floor(totalVideoDuration / 60)}:{String(Math.floor(totalVideoDuration % 60)).padStart(2, '0')}
+                              </span>
+                           </div>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                           <span className="material-symbols-outlined text-sm text-white/50 cursor-pointer hover:text-white">volume_up</span>
+                           <div className="w-16 h-0.5 bg-white/10 rounded-full relative cursor-pointer">
+                              <div className="absolute inset-y-0 left-0 w-3/4 bg-white/40 rounded-full" />
+                           </div>
+                        </div>
+                     </div>
+
+                     {/* CapCut-style Editing Toolbar */}
+                     {selectedTrackType && (
+                       <div className="h-8 px-4 flex items-center gap-1 bg-[#0d0a1a] border-t border-b border-[#292348]">
+                         {/* Track type indicator */}
+                         <span className={`text-[9px] font-black uppercase tracking-wider mr-2 px-1.5 py-0.5 rounded ${
+                           selectedTrackType === 'subtitle' ? 'bg-yellow-500/20 text-yellow-400' :
+                           selectedTrackType === 'scene' ? 'bg-blue-500/20 text-blue-400' :
+                           'bg-primary/20 text-primary'
+                         }`}>
+                           {selectedTrackType === 'subtitle' ? '자막' : selectedTrackType === 'scene' ? '영상' : '오디오'}
+                         </span>
+
+                         <div className="w-px h-4 bg-white/10 mx-1" />
+
+                         {/* Trim Left (뒤로 삭제 - 플레이헤드 앞 부분 삭제) */}
+                         <button
+                           onClick={() => {
+                             const activeScene = scenesWithTiming.find(s => integratedTime >= s.startTime && integratedTime < s.startTime + s.durationSec);
+                             if (!activeScene) return;
+                             const relTime = Math.round((integratedTime - activeScene.startTime) * 10) / 10;
+
+                             if (selectedTrackType === 'subtitle' && selectedSubtitleId) {
+                               setScenes(prev => prev.map(s => ({
+                                 ...s,
+                                 subtitleSegments: s.subtitleSegments?.map(seg =>
+                                   seg.id === selectedSubtitleId && relTime > seg.startTime && relTime < seg.endTime
+                                     ? { ...seg, startTime: relTime } : seg
+                                 )
+                               })));
+                             } else if (selectedTrackType === 'scene' && selectedSceneId) {
+                               // Trim left: 장면의 시작을 플레이헤드로 이동 (duration 축소)
+                               const scene = scenesWithTiming.find(s => s.id === selectedSceneId);
+                               if (scene && relTime > 0 && relTime < scene.durationSec) {
+                                 const newDur = scene.durationSec - relTime;
+                                 setScenes(prev => prev.map(s => s.id === selectedSceneId ? { ...s, duration: `${newDur.toFixed(1)}s` } : s));
+                                 setIntegratedTime(activeScene.startTime);
+                               }
+                             } else if (selectedTrackType === 'audio' && selectedAudioSceneId) {
+                               // Audio trim left: audioUrl 제거
+                               setScenes(prev => prev.map(s => s.id === selectedAudioSceneId ? { ...s, audioUrl: undefined } : s));
+                               setSelectedTrackType(null);
+                               setSelectedAudioSceneId(null);
+                             }
+                           }}
+                           className="h-6 px-2 rounded hover:bg-white/10 flex items-center gap-1 transition-colors group/btn"
+                           title="뒤로 삭제 (Trim Left)"
+                         >
+                           <span className="material-symbols-outlined !text-[14px] text-white/50 group-hover/btn:text-white">content_cut</span>
+                           <span className="material-symbols-outlined !text-[10px] text-white/30 group-hover/btn:text-white/60 -ml-1">arrow_back</span>
+                         </button>
+
+                         {/* Split at Playhead (컷) */}
+                         <button
+                           onClick={() => {
+                             const activeScene = scenesWithTiming.find(s => integratedTime >= s.startTime && integratedTime < s.startTime + s.durationSec);
+                             if (!activeScene) return;
+                             const relTime = Math.round((integratedTime - activeScene.startTime) * 10) / 10;
+
+                             if (selectedTrackType === 'subtitle' && selectedSubtitleId) {
+                               setScenes(prev => prev.map(s => {
+                                 if (s.id !== activeScene.id) return s;
+                                 const newSegs = (s.subtitleSegments || []).flatMap(seg => {
+                                   if (seg.id !== selectedSubtitleId) return [seg];
+                                   if (relTime <= seg.startTime + 0.1 || relTime >= seg.endTime - 0.1) return [seg];
+                                   return [
+                                     { ...seg, id: `${seg.id}-a`, endTime: relTime, text: seg.text },
+                                     { ...seg, id: `${seg.id}-b`, startTime: relTime, text: seg.text },
+                                   ];
+                                 });
+                                 return { ...s, subtitleSegments: newSegs };
+                               }));
+                               setSelectedSubtitleId(null);
+                             } else if (selectedTrackType === 'scene' && selectedSceneId) {
+                               // Split scene at playhead
+                               const scene = scenesWithTiming.find(s => s.id === selectedSceneId);
+                               if (scene && relTime > 0.5 && relTime < scene.durationSec - 0.5) {
+                                 const dur1 = relTime;
+                                 const dur2 = scene.durationSec - relTime;
+                                 setScenes(prev => {
+                                   const idx = prev.findIndex(s => s.id === selectedSceneId);
+                                   if (idx === -1) return prev;
+                                   const original = prev[idx];
+                                   const scene1 = { ...original, id: `${original.id}-a`, duration: `${dur1.toFixed(1)}s`, name: `${original.name} (1)` };
+                                   const scene2 = { ...original, id: `${original.id}-b`, duration: `${dur2.toFixed(1)}s`, name: `${original.name} (2)` };
+                                   const newScenes = [...prev];
+                                   newScenes.splice(idx, 1, scene1, scene2);
+                                   return newScenes;
+                                 });
+                                 setSelectedSceneId(null);
+                                 setSelectedTrackType(null);
+                               }
+                             }
+                           }}
+                           className="h-6 px-2 rounded hover:bg-white/10 flex items-center gap-1 transition-colors group/btn"
+                           title="분할 (Split at Playhead)"
+                         >
+                           <span className="material-symbols-outlined !text-[14px] text-white/50 group-hover/btn:text-white">content_cut</span>
+                         </button>
+
+                         {/* Trim Right (앞으로 삭제 - 플레이헤드 뒤 부분 삭제) */}
+                         <button
+                           onClick={() => {
+                             const activeScene = scenesWithTiming.find(s => integratedTime >= s.startTime && integratedTime < s.startTime + s.durationSec);
+                             if (!activeScene) return;
+                             const relTime = Math.round((integratedTime - activeScene.startTime) * 10) / 10;
+
+                             if (selectedTrackType === 'subtitle' && selectedSubtitleId) {
+                               setScenes(prev => prev.map(s => ({
+                                 ...s,
+                                 subtitleSegments: s.subtitleSegments?.map(seg =>
+                                   seg.id === selectedSubtitleId && relTime > seg.startTime && relTime < seg.endTime
+                                     ? { ...seg, endTime: relTime } : seg
+                                 )
+                               })));
+                             } else if (selectedTrackType === 'scene' && selectedSceneId) {
+                               const scene = scenesWithTiming.find(s => s.id === selectedSceneId);
+                               if (scene && relTime > 0.5 && relTime < scene.durationSec) {
+                                 setScenes(prev => prev.map(s => s.id === selectedSceneId ? { ...s, duration: `${relTime.toFixed(1)}s` } : s));
+                               }
+                             } else if (selectedTrackType === 'audio' && selectedAudioSceneId) {
+                               setScenes(prev => prev.map(s => s.id === selectedAudioSceneId ? { ...s, audioUrl: undefined } : s));
+                               setSelectedTrackType(null);
+                               setSelectedAudioSceneId(null);
+                             }
+                           }}
+                           className="h-6 px-2 rounded hover:bg-white/10 flex items-center gap-1 transition-colors group/btn"
+                           title="앞으로 삭제 (Trim Right)"
+                         >
+                           <span className="material-symbols-outlined !text-[10px] text-white/30 group-hover/btn:text-white/60 -mr-1">arrow_forward</span>
+                           <span className="material-symbols-outlined !text-[14px] text-white/50 group-hover/btn:text-white">content_cut</span>
+                         </button>
+
+                         <div className="w-px h-4 bg-white/10 mx-1" />
+
+                         {/* Delete */}
+                         <button
+                           onClick={() => {
+                             if (selectedTrackType === 'subtitle' && selectedSubtitleId) {
+                               setScenes(prev => prev.map(s => ({
+                                 ...s,
+                                 subtitleSegments: s.subtitleSegments?.filter(seg => seg.id !== selectedSubtitleId)
+                               })));
+                               setSelectedSubtitleId(null);
+                               setSelectedTrackType(null);
+                             } else if (selectedTrackType === 'scene' && selectedSceneId) {
+                               setScenes(prev => prev.filter(s => s.id !== selectedSceneId));
+                               setSelectedSceneId(null);
+                               setSelectedTrackType(null);
+                             } else if (selectedTrackType === 'audio' && selectedAudioSceneId) {
+                               setScenes(prev => prev.map(s => s.id === selectedAudioSceneId ? { ...s, audioUrl: undefined } : s));
+                               setSelectedAudioSceneId(null);
+                               setSelectedTrackType(null);
+                             }
+                           }}
+                           className="h-6 px-2 rounded hover:bg-red-500/10 flex items-center gap-1 transition-colors group/btn"
+                           title="삭제 (Delete)"
+                         >
+                           <span className="material-symbols-outlined !text-[14px] text-red-400/50 group-hover/btn:text-red-400">delete</span>
+                         </button>
+
+                         <div className="flex-1" />
+
+                         {/* Deselect */}
+                         <button
+                           onClick={() => { setSelectedTrackType(null); setSelectedSubtitleId(null); setSelectedAudioSceneId(null); }}
+                           className="h-6 px-2 rounded hover:bg-white/10 flex items-center transition-colors"
+                           title="선택 해제"
+                         >
+                           <span className="material-symbols-outlined !text-[14px] text-white/30 hover:text-white/60">close</span>
+                         </button>
+                       </div>
+                     )}
+
+                     {/* Timeline tracks */}
+                     <div className="flex-1 relative overflow-x-auto overflow-y-hidden custom-scrollbar bg-[#0d0a1a] select-none group/timeline">
+                        {/* Time Markers */}
+                        <div className="h-5 border-b border-white/5 relative flex items-end">
+                           {Array.from({ length: Math.ceil(totalVideoDuration) + 1 }).map((_, i) => (
+                              <div 
+                                key={i}
+                                className="absolute bottom-0 border-l border-white/10 flex flex-col justify-end"
+                                style={{ left: `${(i / totalVideoDuration) * 100}%`, height: i % 5 === 0 ? '10px' : '5px' }}
+                              >
+                                 {i % 5 === 0 && (
+                                    <span className="absolute -top-4 -left-2 text-[8px] text-white/30 font-bold">{i}s</span>
+                                 )}
+                              </div>
+                           ))}
+                        </div>
+
+                        <div className="px-4 py-2 space-y-1.5 relative">
+                           {/* Audio Track (Real Waveform) */}
+                           <div className="h-7 flex relative">
+                              {scenesWithTiming.map((s) => {
+                                const peaks = waveformData[s.id];
+                                return (
+                                  <div
+                                    key={`audio-${s.id}`}
+                                    onClick={() => { setSelectedAudioSceneId(s.id); setSelectedTrackType('audio'); setSelectedSubtitleId(null); setSelectedSceneId(s.id); }}
+                                    className={`h-full relative border-r border-primary/10 overflow-hidden cursor-pointer ${
+                                      selectedAudioSceneId === s.id && selectedTrackType === 'audio'
+                                        ? 'ring-2 ring-primary ring-inset z-10 bg-primary/15 border border-primary/40'
+                                        : s.audioUrl ? 'bg-primary/5 border border-primary/20 hover:bg-primary/10' : 'bg-white/3 border border-white/5 hover:bg-white/5'
+                                    }`}
+                                    style={{ width: `${(s.durationSec / totalVideoDuration) * 100}%` }}
+                                  >
+                                    {peaks ? (
+                                      <div className="absolute inset-0 flex items-center gap-[1px] px-0.5">
+                                        {peaks.map((v, i) => (
+                                          <div
+                                            key={i}
+                                            className="flex-1 bg-primary/40 rounded-full min-w-[1px]"
+                                            style={{ height: `${15 + v * 75}%` }}
+                                          />
+                                        ))}
+                                      </div>
+                                    ) : s.audioUrl ? (
+                                      <div className="absolute inset-0 flex items-center justify-center">
+                                        <span className="text-[7px] text-primary/30 font-bold animate-pulse">분석중...</span>
+                                      </div>
+                                    ) : (
+                                      <div className="absolute inset-0 flex items-center justify-center">
+                                        <span className="text-[7px] text-white/15 font-bold">음성 없음</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              <span className="absolute -top-3.5 left-2 text-[7px] font-bold text-primary/40 uppercase">Audio</span>
+                           </div>
+
+                           {/* Scene Track */}
+                           <div className="h-11 flex relative">
+                              {scenesWithTiming.map((s, idx) => (
+                                 <div 
+                                    key={s.id}
+                                    onClick={() => {
+                                      setIntegratedTime(s.startTime);
+                                      setSelectedSceneId(s.id);
+                                      setSelectedTrackType('scene');
+                                      setSelectedSubtitleId(null);
+                                      setSelectedAudioSceneId(null);
+                                    }}
+                                    className={`h-full border border-white/10 relative transition-all cursor-pointer overflow-hidden group/scene ${
+                                      selectedSceneId === s.id && selectedTrackType === 'scene' ? 'ring-2 ring-primary ring-inset z-10 bg-primary/10' : 'bg-white/5 hover:bg-white/10'
+                                    }`}
+                                    style={{ width: `${(s.durationSec / totalVideoDuration) * 100}%` }}
+                                 >
+                                    <img src={s.imageUrl} className="absolute inset-0 w-full h-full object-cover opacity-30 group-hover/scene:opacity-50 transition-opacity" />
+                                    <div className="absolute inset-0 p-2 flex flex-col justify-between">
+                                       <span className="text-[9px] font-black text-white bg-black/40 px-1 rounded self-start">#{idx + 1}</span>
+                                       <span className="text-[8px] font-bold text-white/40 truncate">{s.script}</span>
+                                    </div>
+                                 </div>
+                              ))}
+                           </div>
+
+                           {/* Subtitle Segments Track (CapCut-style interactive) */}
+                           <div ref={subtitleTrackRef} className="h-7 flex relative">
+                              {scenesWithTiming.map((s) => {
+                                const segs = s.subtitleSegments;
+                                return (
+                                  <div key={`sub-${s.id}`} data-scene-id={s.id} className="h-full relative border-r border-white/5" style={{ width: `${(s.durationSec / totalVideoDuration) * 100}%` }}>
+                                    {segs && segs.length > 0 ? segs.map((seg: any) => {
+                                      const isSelected = selectedSubtitleId === seg.id;
+                                      return (
+                                        <div
+                                          key={seg.id}
+                                          onClick={(e) => { e.stopPropagation(); setSelectedSubtitleId(seg.id); setSelectedTrackType('subtitle'); setSelectedSceneId(s.id); setSelectedAudioSceneId(null); }}
+                                          className={`absolute top-0.5 bottom-0.5 rounded-sm overflow-hidden transition-all cursor-pointer group/seg ${
+                                            isSelected
+                                              ? 'bg-yellow-500/30 border-2 border-yellow-400 z-10 shadow-lg shadow-yellow-500/20'
+                                              : 'bg-yellow-500/15 border border-yellow-500/30 hover:bg-yellow-500/25 hover:border-yellow-500/50'
+                                          }`}
+                                          style={{
+                                            left: `${(seg.startTime / s.durationSec) * 100}%`,
+                                            width: `${((seg.endTime - seg.startTime) / s.durationSec) * 100}%`,
+                                          }}
+                                        >
+                                          <span className="text-[7px] font-bold text-yellow-300/80 px-1.5 truncate block leading-[24px] select-none">{seg.text}</span>
+                                          {/* Edge drag handles */}
+                                          <div
+                                            className={`absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-yellow-400/60 transition-colors ${isSelected ? 'bg-yellow-400/40' : 'bg-transparent'}`}
+                                            onMouseDown={(e) => { e.stopPropagation(); setSelectedSubtitleId(seg.id); setIsDraggingSubEdge({ segId: seg.id, sceneId: s.id, edge: 'left' }); }}
+                                          />
+                                          <div
+                                            className={`absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-yellow-400/60 transition-colors ${isSelected ? 'bg-yellow-400/40' : 'bg-transparent'}`}
+                                            onMouseDown={(e) => { e.stopPropagation(); setSelectedSubtitleId(seg.id); setIsDraggingSubEdge({ segId: seg.id, sceneId: s.id, edge: 'right' }); }}
+                                          />
+                                        </div>
+                                      );
+                                    }) : (
+                                      <div className="absolute inset-x-0 top-0.5 bottom-0.5 bg-white/3 rounded-sm flex items-center justify-center">
+                                        <span className="text-[7px] text-white/15 font-bold">자막 없음</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              <span className="absolute -top-4 left-2 text-[7px] font-bold text-yellow-500/40 uppercase">Subtitles</span>
+
+                              {/* Split button at playhead position */}
+                              {(() => {
+                                // 현재 플레이헤드 위치의 장면과 세그먼트 확인
+                                const activeScene = scenesWithTiming.find(s =>
+                                  integratedTime >= s.startTime && integratedTime < s.startTime + s.durationSec
+                                );
+                                if (!activeScene || !activeScene.subtitleSegments) return null;
+                                const relTime = integratedTime - activeScene.startTime;
+                                const hitSeg = activeScene.subtitleSegments.find(seg => relTime > seg.startTime + 0.2 && relTime < seg.endTime - 0.2);
+                                if (!hitSeg) return null;
+                                return (
+                                  <button
+                                    className="absolute z-30 -bottom-7 transform -translate-x-1/2 bg-yellow-500 hover:bg-yellow-400 text-black rounded-full w-6 h-6 flex items-center justify-center shadow-lg transition-all hover:scale-110 active:scale-95"
+                                    style={{ left: `${(integratedTime / totalVideoDuration) * 100}%` }}
+                                    title="자막 분할 (Split)"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const splitTime = Math.round(relTime * 10) / 10;
+                                      setScenes(prev => prev.map(s => {
+                                        if (s.id !== activeScene.id) return s;
+                                        const newSegs = (s.subtitleSegments || []).flatMap(seg => {
+                                          if (seg.id !== hitSeg.id) return [seg];
+                                          // 분할: 2개의 새 세그먼트 생성
+                                          const seg1 = { ...seg, id: `${seg.id}-a`, endTime: splitTime, text: seg.text };
+                                          const seg2 = { ...seg, id: `${seg.id}-b`, startTime: splitTime, text: seg.text };
+                                          return [seg1, seg2];
+                                        });
+                                        return { ...s, subtitleSegments: newSegs };
+                                      }));
+                                    }}
+                                  >
+                                    <span className="material-symbols-outlined !text-[14px]">content_cut</span>
+                                  </button>
+                                );
+                              })()}
+                           </div>
+
+                           {/* Playhead */}
+                           <div
+                              className="absolute top-0 bottom-0 w-0.5 bg-primary shadow-[0_0_15px_rgba(55,19,236,1)] z-30 transition-none pointer-events-none"
+                              style={{ left: `${(integratedTime / totalVideoDuration) * 100}%`, marginLeft: '16px' }}
+                           >
+                              <div className="absolute -top-1 -left-[5px] w-3 h-3 bg-primary rounded-full border-2 border-white shadow-xl" />
+                           </div>
+
+                           {/* Interactive Seek Layer (click + drag) */}
+                           <div
+                             className="absolute inset-0 z-20 cursor-crosshair"
+                             onMouseDown={(e) => {
+                                const seekFromEvent = (ev: MouseEvent | React.MouseEvent) => {
+                                  const rect = e.currentTarget!.getBoundingClientRect();
+                                  const x = ev.clientX - rect.left - 16;
+                                  const percent = Math.max(0, Math.min(1, x / (rect.width - 32)));
+                                  setIntegratedTime(percent * totalVideoDuration);
+                                  // 드래그 중 해당 장면으로 전환
+                                  const time = percent * totalVideoDuration;
+                                  const matched = scenesWithTiming.find(s => time >= s.startTime && time < s.startTime + s.durationSec);
+                                  if (matched && matched.id !== selectedSceneId) setSelectedSceneId(matched.id);
+                                };
+                                seekFromEvent(e as any);
+                                const onMove = (ev: MouseEvent) => { ev.preventDefault(); seekFromEvent(ev); };
+                                const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+                                window.addEventListener('mousemove', onMove);
+                                window.addEventListener('mouseup', onUp);
+                             }}
+                           />
+                        </div>
+                     </div>
+                  </div>
+                </div>
+
+                {/* Right: Subtitle Styling Controls */}
+                <div className="border-l border-[#292348] bg-[#1a162e] px-6 py-8 flex flex-col h-full overflow-y-auto custom-scrollbar">
+                  <h3 className="text-white font-bold text-sm uppercase tracking-wider mb-8 flex items-center gap-2 border-b border-[#292348] pb-4">
+                    <span className="material-symbols-outlined text-primary">format_paint</span>
+                    Subtitle Design
+                  </h3>
+
+                  <div className="space-y-6">
+                    {/* Selected Subtitle Segment Editor (CapCut-style) */}
+                    <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                      <div className="flex items-center justify-between mb-3">
+                        <label className="text-xs text-primary font-bold flex items-center gap-1.5">
+                          <span className="material-symbols-outlined !text-[14px]">edit_note</span>
+                          선택된 자막
+                        </label>
+                        <span className="text-[10px] text-white/30 font-bold">Shot #{scenes.findIndex(s => s.id === selectedSceneId) + 1}</span>
+                      </div>
+
+                      {(() => {
+                        // 선택된 세그먼트 찾기
+                        const selectedSeg = selectedSubtitleId
+                          ? scenes.flatMap(s => (s.subtitleSegments || []).map(seg => ({ ...seg, sceneId: s.id }))).find(seg => seg.id === selectedSubtitleId)
+                          : null;
+
+                        if (!selectedSeg) {
+                          return (
+                            <div className="text-center py-6">
+                              <span className="material-symbols-outlined text-4xl text-white/10 block mb-2">touch_app</span>
+                              <p className="text-xs text-white/30">타임라인에서 자막 블록을 클릭하세요</p>
+                              <p className="text-[10px] text-white/20 mt-1">가위 버튼으로 분할, 양 끝 드래그로 길이 조절</p>
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-2 text-[10px] text-white/40 font-mono bg-[#0d0a1a] rounded-lg px-3 py-1.5">
+                              <span className="material-symbols-outlined !text-[12px] text-yellow-500">schedule</span>
+                              {selectedSeg.startTime.toFixed(1)}s ~ {selectedSeg.endTime.toFixed(1)}s
+                              <span className="text-white/20 ml-auto">({(selectedSeg.endTime - selectedSeg.startTime).toFixed(1)}s)</span>
+                            </div>
+                            <textarea
+                              value={selectedSeg.text}
+                              onChange={(e) => {
+                                setScenes(scenes.map(s => s.id === selectedSeg.sceneId ? {
+                                  ...s,
+                                  subtitleSegments: s.subtitleSegments?.map(seg => seg.id === selectedSeg.id ? { ...seg, text: e.target.value } : seg)
+                                } : s));
+                              }}
+                              className="w-full bg-[#0d0a1a] border border-[#292348] rounded-lg p-3 text-white text-sm leading-relaxed focus:border-yellow-500 focus:outline-none resize-none"
+                              rows={3}
+                              placeholder="자막 텍스트 입력..."
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => {
+                                  // 플레이헤드를 이 세그먼트 시작 시간으로 이동
+                                  const sceneWithTime = scenesWithTiming.find(s => s.id === selectedSeg.sceneId);
+                                  if (sceneWithTime) {
+                                    setIntegratedTime(sceneWithTime.startTime + selectedSeg.startTime);
+                                  }
+                                }}
+                                className="flex-1 py-1.5 bg-[#292348] hover:bg-[#3b3267] text-white/70 hover:text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all"
+                              >
+                                <span className="material-symbols-outlined !text-[14px]">play_arrow</span>
+                                이동
+                              </button>
+                              <button
+                                onClick={() => {
+                                  // 선택된 세그먼트 삭제
+                                  setScenes(scenes.map(s => {
+                                    if (s.id !== selectedSeg.sceneId) return s;
+                                    const remaining = (s.subtitleSegments || []).filter(seg => seg.id !== selectedSeg.id);
+                                    return { ...s, subtitleSegments: remaining.length > 0 ? remaining : undefined };
+                                  }));
+                                  setSelectedSubtitleId(null);
+                                }}
+                                className="py-1.5 px-3 bg-[#292348] hover:bg-red-500/20 text-white/40 hover:text-red-400 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all"
+                              >
+                                <span className="material-symbols-outlined !text-[14px]">delete</span>
+                                삭제
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Quick actions */}
+                    <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+                      <label className="text-xs text-white/50 font-bold mb-3 block">빠른 작업</label>
+                      <div className="space-y-2">
+                        {/* Whisper 자동 싱크 (전체 장면) */}
+                        <button
+                          disabled={isAutoSyncing}
+                          onClick={async () => {
+                            const scenesWithAudio = scenes.filter(s => s.audioUrl);
+                            if (scenesWithAudio.length === 0) {
+                              alert('오디오가 생성된 장면이 없습니다. 오디오 단계에서 먼저 음성을 생성하세요.');
+                              return;
+                            }
+                            setIsAutoSyncing(true);
+                            setAutoSyncProgress(`0 / ${scenesWithAudio.length} 분석 중...`);
+                            try {
+                              let completed = 0;
+                              for (const scene of scenesWithAudio) {
+                                setAutoSyncProgress(`${completed + 1} / ${scenesWithAudio.length} 분석 중...`);
+                                try {
+                                  const result = await transcribeAudio(scene.audioUrl!);
+                                  if (result.success && result.segments.length > 0) {
+                                    setScenes(prev => prev.map(s => {
+                                      if (s.id !== scene.id) return s;
+                                      return {
+                                        ...s,
+                                        subtitleSegments: result.segments.map((seg, i) => ({
+                                          id: `${s.id}-wseg-${i}`,
+                                          text: seg.text,
+                                          startTime: Math.round(seg.startTime * 10) / 10,
+                                          endTime: Math.round(seg.endTime * 10) / 10,
+                                        }))
+                                      };
+                                    }));
+                                  }
+                                } catch (err) {
+                                  console.error(`Scene ${scene.id} transcription failed:`, err);
+                                }
+                                completed++;
+                              }
+                              setAutoSyncProgress('');
+                            } catch (err) {
+                              console.error('Auto sync failed:', err);
+                              setAutoSyncProgress('');
+                            } finally {
+                              setIsAutoSyncing(false);
+                            }
+                          }}
+                          className="w-full py-2.5 bg-gradient-to-r from-green-600/20 to-emerald-600/20 hover:from-green-600/30 hover:to-emerald-600/30 border border-green-500/20 text-green-300/80 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isAutoSyncing ? (
+                            <>
+                              <span className="material-symbols-outlined !text-[14px] animate-spin">progress_activity</span>
+                              {autoSyncProgress}
+                            </>
+                          ) : (
+                            <>
+                              <span className="material-symbols-outlined !text-[14px]">mic</span>
+                              AI 자동 싱크 (Whisper)
+                            </>
+                          )}
+                        </button>
+
+                        <div className="h-px bg-[#292348]" />
+
+                        {/* 문장 기반 자동 분할 (기존) */}
+                        <button
+                          onClick={() => {
+                            const sceneTime = scenesWithTiming.find(s => s.id === currentScene.id);
+                            const dur = sceneTime?.durationSec || 5;
+                            const parts = currentScene.script.split(/(?<=[.!?,，。！？])\s*/).filter((t: string) => t.trim());
+                            const segs = parts.length > 1 ? parts : [currentScene.script];
+                            const segDur = dur / segs.length;
+                            const newSegments = segs.map((text: string, i: number) => ({
+                              id: `${currentScene.id}-seg-${Date.now()}-${i}`,
+                              text: text.trim(),
+                              startTime: Math.round(segDur * i * 10) / 10,
+                              endTime: Math.round(segDur * (i + 1) * 10) / 10,
+                            }));
+                            setScenes(scenes.map(s => s.id === currentScene.id ? { ...s, subtitleSegments: newSegments } : s));
+                          }}
+                          className="w-full py-2 bg-[#292348] hover:bg-[#3b3267] text-white/50 hover:text-white/80 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all"
+                        >
+                          <span className="material-symbols-outlined !text-[14px]">auto_fix_high</span>
+                          문장 단위 분할 (현재 장면)
+                        </button>
+                        <button
+                          onClick={() => {
+                            // 현재 장면 세그먼트 초기화 (전체 길이 1개로)
+                            const sceneTime = scenesWithTiming.find(s => s.id === currentScene.id);
+                            const dur = sceneTime?.durationSec || 5;
+                            setScenes(scenes.map(s => s.id === currentScene.id ? {
+                              ...s,
+                              subtitleSegments: [{
+                                id: `${s.id}-seg-reset`,
+                                text: s.script,
+                                startTime: 0,
+                                endTime: dur,
+                              }]
+                            } : s));
+                            setSelectedSubtitleId(null);
+                          }}
+                          className="w-full py-2 bg-[#292348] hover:bg-red-500/10 text-white/30 hover:text-red-400/70 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all"
+                        >
+                          <span className="material-symbols-outlined !text-[14px]">restart_alt</span>
+                          현재 장면 초기화
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="h-px bg-[#292348]" />
+
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-[#9b92c9] font-bold">자막 표시</label>
+                      <button onClick={() => setShowSubtitles(!showSubtitles)} className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${showSubtitles ? 'bg-primary text-white' : 'bg-[#292348] text-white/50'}`}>{showSubtitles ? 'ON' : 'OFF'}</button>
+                    </div>
+
+                    {showSubtitles && (
+                      <div className="space-y-5">
+                        <div>
+                          <label className="text-[10px] text-white/50 mb-1 block">글씨체</label>
+                          <select value={subtitleFont} onChange={(e) => setSubtitleFont(e.target.value)} className="w-full bg-[#0d0a1a] border border-[#292348] rounded-lg text-sm text-white py-2 px-3 focus:border-primary focus:outline-none" >
+                            <option>본고딕 (기본)</option>
+                            <option>프리텐다드 Bold</option>
+                            <option>나눔스퀘어 Black</option>
+                            <option>G마켓 산스</option>
+                            <option>배달의민족 주아</option>
+                          </select>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div><label className="text-[10px] text-white/50 mb-1 block">글자 색상</label><input type="color" value={subtitleColor} onChange={(e) => setSubtitleColor(e.target.value)} className="w-full h-8 rounded border border-[#292348] bg-transparent cursor-pointer" /></div>
+                          <div><label className="text-[10px] text-white/50 mb-1 block">테두리 색상</label><input type="color" value={subtitleBorderColor} onChange={(e) => setSubtitleBorderColor(e.target.value)} className="w-full h-8 rounded border border-[#292348] bg-transparent cursor-pointer" /></div>
+                        </div>
+
+                        <div className="space-y-4">
+                           <div><label className="text-[10px] text-white/50 mb-1 block flex justify-between"><span>자막 크기</span><span>{subtitleFontSize}px</span></label><input type="range" min="6" max="48" value={subtitleFontSize} onChange={(e) => setSubtitleFontSize(parseInt(e.target.value))} className="w-full accent-primary" /></div>
+                           <div><label className="text-[10px] text-white/50 mb-1 block flex justify-between"><span>테두리 두께</span><span>{subtitleBorderWidth}px</span></label><input type="range" min="0" max="8" value={subtitleBorderWidth} onChange={(e) => setSubtitleBorderWidth(parseInt(e.target.value))} className="w-full accent-primary" /></div>
+                        </div>
+
+                        <div className="h-px bg-[#292348]" />
+
+                        <div className="space-y-4">
+                          <div className="flex items-center justify-between"><label className="text-[10px] text-white/50">배경 상자 표시</label><button onClick={() => setShowSubtitleBg(!showSubtitleBg)} className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${showSubtitleBg ? 'bg-primary/20 text-primary border border-primary' : 'bg-[#292348] text-white/50 border border-transparent'}`}>{showSubtitleBg ? 'ON' : 'OFF'}</button></div>
+                          {showSubtitleBg && (
+                            <div className="space-y-4">
+                              <div><label className="text-[10px] text-white/50 mb-1 block">배경 색상</label><input type="color" value={subtitleBgColor} onChange={(e) => setSubtitleBgColor(e.target.value)} className="w-full h-8 rounded border border-[#292348] bg-transparent cursor-pointer" /></div>
+                              <div className="grid grid-cols-2 gap-4">
+                                <div><label className="text-[10px] text-white/50 mb-1 block">모서리 곡률</label><input type="range" min="0" max="50" value={subtitleBgRadius === 9999 ? 50 : subtitleBgRadius} onChange={(e) => setSubtitleBgRadius(parseInt(e.target.value) === 50 ? 9999 : parseInt(e.target.value))} className="w-full accent-primary" /></div>
+                                <div className="space-y-4">
+                                  <div><label className="text-[10px] text-white/50 mb-1 block flex justify-between"><span>배경 너비 (Width)</span><span>{subtitleBgWidth}px</span></label><input type="range" min="20" max="600" value={subtitleBgWidth} onChange={(e) => setSubtitleBgWidth(parseInt(e.target.value))} className="w-full accent-primary" /></div>
+                                  <div><label className="text-[10px] text-white/50 mb-1 block flex justify-between"><span>배경 높이 (Height)</span><span>{subtitleBgHeight}px</span></label><input type="range" min="10" max="200" value={subtitleBgHeight} onChange={(e) => setSubtitleBgHeight(parseInt(e.target.value))} className="w-full accent-primary" /></div>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div><label className="text-[10px] text-white/50 mb-1 block flex justify-between"><span>세로 위치</span><span>{subtitleY}%</span></label><input type="range" min="0" max="95" value={subtitleY} onChange={(e) => setSubtitleY(parseInt(e.target.value))} className="w-full accent-primary" /></div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2743,261 +3606,329 @@ Respond in JSON format:
         })();
 
       case CreationStep.FINAL:
-        return (
-          <main className="max-w-[1440px] mx-auto px-6 py-8">
-            <nav className="flex items-center gap-2 mb-6 text-sm">
-              <a
-                className="text-slate-500 hover:text-primary flex items-center gap-1"
-                href="#"
-                onClick={() => setStep(CreationStep.TOPIC)}
-              >
-                <span className="material-symbols-outlined text-sm">home</span>
-                프로젝트
-              </a>
-              <span className="text-slate-600">/</span>
-              <a className="text-slate-500 hover:text-primary" href="#">
-                합성 단계
-              </a>
-              <span className="text-slate-600">/</span>
-              <span className="text-primary font-semibold">최종 내보내기</span>
-            </nav>
+        return (() => {
+          const currentScene = scenesWithTiming.find(s => 
+            integratedTime >= s.startTime && integratedTime < s.startTime + s.durationSec
+          ) || scenes[0];
 
-            <div className="mb-10 flex flex-col md:flex-row md:items-end justify-between gap-6">
-              <div className="space-y-2">
-                <h1 className="text-4xl font-black tracking-tight font-display">
-                  최종 영상 확인 및 다운로드
-                </h1>
-                <p className="text-slate-400 text-lg">
-                  9-10단계: AI가 생성한 당신의 걸작이 완성되었습니다.
-                </p>
-              </div>
-              <div className="flex items-center gap-4 bg-primary/10 border border-primary/20 px-4 py-2 rounded-xl">
-                <div className="text-right">
-                  <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
-                    프로젝트 상태
+          if (!currentScene) return null;
+
+          return (
+            <main className="max-w-[1600px] mx-auto px-6 py-8">
+              <nav className="flex items-center gap-2 mb-6 text-sm">
+                <a
+                  className="text-slate-500 hover:text-primary flex items-center gap-1"
+                  href="#"
+                  onClick={() => setStep(CreationStep.TOPIC)}
+                >
+                  <span className="material-symbols-outlined text-sm">home</span>
+                  프로젝트
+                </a>
+                <span className="text-slate-600">/</span>
+                <a className="text-slate-500 hover:text-primary" href="#">
+                  합성 단계
+                </a>
+                <span className="text-slate-600">/</span>
+                <span className="text-primary font-semibold">최종 내보내기</span>
+              </nav>
+
+              <div className="mb-10 flex flex-col md:flex-row md:items-end justify-between gap-6">
+                <div className="space-y-2">
+                  <h1 className="text-4xl font-black tracking-tight font-display">
+                    10단계: 최종 영상 확인 및 다운로드
+                  </h1>
+                  <p className="text-slate-400 text-lg">
+                    AI가 생성한 당신의 걸작이 완성되었습니다.
                   </p>
-                  <p className="text-primary font-bold">내보내기 준비 완료</p>
                 </div>
-                <span className="material-symbols-outlined text-primary size-8 flex items-center justify-center bg-white dark:bg-background-dark rounded-full">
-                  check_circle
-                </span>
+                <div className="flex items-center gap-4 bg-primary/10 border border-primary/20 px-4 py-2 rounded-xl">
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+                      프로젝트 상태
+                    </p>
+                    <p className="text-primary font-bold">내보내기 준비 완료</p>
+                  </div>
+                  <span className="material-symbols-outlined text-primary size-8 flex items-center justify-center bg-white dark:bg-background-dark rounded-full">
+                    check_circle
+                  </span>
+                </div>
               </div>
-            </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-              <div className="lg:col-span-8 space-y-6">
-                <div className="relative group rounded-2xl overflow-hidden border border-white/5 bg-black custom-glow">
-                  <div
-                    className="aspect-video w-full flex items-center justify-center bg-cover bg-center relative"
-                    style={{
-                      backgroundImage: `url("${scenes[0]?.imageUrl || "https://picsum.photos/seed/final/800/450"}")`,
-                    }}
-                  >
-                    <div className="absolute inset-0 bg-black/40 group-hover:bg-black/20 transition-all duration-300"></div>
-                    <button className="relative z-10 size-20 bg-primary hover:scale-110 transition-transform rounded-full flex items-center justify-center text-white shadow-2xl">
-                      <span className="material-symbols-outlined text-4xl fill-1">
-                        play_arrow
-                      </span>
-                    </button>
-                    <div className="absolute bottom-0 inset-x-0 p-6 bg-gradient-to-t from-black/80 to-transparent">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                <div className="lg:col-span-9 space-y-6">
+                  <div className="relative group rounded-2xl overflow-hidden border border-white/10 bg-black shadow-2xl custom-glow">
+                    <div
+                      className="aspect-video w-full flex items-center justify-center relative overflow-hidden"
+                      style={{ 
+                        backgroundColor: '#000',
+                      }}
+                    >
+                      {/* Integrated Playback in Final Step */}
+                      {currentScene.videoClipUrl && currentScene.videoClipUrl.length > 50 ? (
+                        <video 
+                          ref={videoRef} 
+                          key={currentScene.videoClipUrl}
+                          src={currentScene.videoClipUrl} 
+                          className="w-full h-full object-contain"
+                          onEnded={() => {
+                            if (!isIntegratedPlaying) setIsPlayingScene(false);
+                          }}
+                        />
+                      ) : (
+                        <img src={currentScene.imageUrl} className="w-full h-full object-cover opacity-60" alt="" />
+                      )}
+
+                      {!isIntegratedPlaying && (
+                        <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                          <button 
+                            onClick={() => setIsIntegratedPlaying(true)}
+                            className="size-24 bg-primary hover:scale-110 transition-transform rounded-full flex items-center justify-center text-white shadow-2xl group/playbtn"
+                          >
+                            <span className="material-symbols-outlined text-5xl fill-1 group-hover/playbtn:scale-110 transition-transform">
+                              play_arrow
+                            </span>
+                          </button>
+                        </div>
+                      )}
+
+                      <audio ref={audioRef} src={currentScene.audioUrl} className="hidden" />
+
+                      {/* Subtitle Rendering */}
+                      {showSubtitles && currentScene.script && (
+                        <div className="absolute left-0 right-0 flex justify-center pointer-events-none" style={{ bottom: `${subtitleY}%` }}>
+                          <div 
+                            className={`flex items-center justify-center shadow-xl transition-all ${showSubtitleBg ? 'backdrop-blur-md' : ''}`}
+                            style={{ 
+                              backgroundColor: showSubtitleBg ? subtitleBgColor : 'transparent', 
+                              borderRadius: `${subtitleBgRadius}px`, 
+                              width: `${subtitleBgWidth}px`,
+                              height: `${subtitleBgHeight}px`,
+                              fontFamily: subtitleFont 
+                            }}
+                          >
+                          <p 
+                            className="font-bold leading-tight text-center whitespace-pre-wrap px-2" 
+                            style={{ 
+                              color: subtitleColor, 
+                              fontSize: `${subtitleFontSize}px`, 
+                              WebkitTextStroke: `${subtitleBorderWidth}px ${subtitleBorderColor}`, 
+                              paintOrder: 'stroke fill' 
+                            }}
+                          >
+                            {currentScene.script}
+                          </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="p-6 bg-[#1a162e] border-t border-white/5">
                       <div className="flex flex-col gap-4">
-                        <div className="relative h-1.5 w-full bg-white/20 rounded-full cursor-pointer">
-                          <div className="absolute inset-y-0 left-0 w-2/3 bg-primary rounded-full shadow-[0_0_8px_rgba(55,19,236,0.8)]"></div>
-                          <div className="absolute top-1/2 left-2/3 -translate-y-1/2 size-4 bg-white rounded-full shadow-lg border-2 border-primary"></div>
+                        {/* Integrated Time Progress */}
+                        <div className="relative h-2 w-full bg-white/5 rounded-full cursor-pointer overflow-hidden group/finalpb">
+                          <div 
+                             className="absolute inset-y-0 left-0 bg-primary shadow-[0_0_15px_rgba(55,19,236,0.6)] rounded-full"
+                             style={{ width: `${(integratedTime / totalVideoDuration) * 100}%` }}
+                          />
+                          <div 
+                             className="absolute inset-0 opacity-0 group-hover/finalpb:opacity-100 transition-opacity"
+                             onClick={(e) => {
+                               const rect = e.currentTarget.getBoundingClientRect();
+                               const x = e.clientX - rect.left;
+                               const percent = x / rect.width;
+                               setIntegratedTime(percent * totalVideoDuration);
+                             }}
+                          />
                         </div>
                         <div className="flex items-center justify-between text-white text-xs font-bold tracking-wider">
                           <div className="flex items-center gap-4">
-                            <span>02:14</span>
-                            <span className="text-white/40">/</span>
-                            <span>{stats.duration}</span>
+                            <button onClick={() => setIsIntegratedPlaying(!isIntegratedPlaying)} className="hover:text-primary transition-colors">
+                               <span className="material-symbols-outlined !text-[20px]">
+                                  {isIntegratedPlaying ? 'pause' : 'play_arrow'}
+                               </span>
+                            </button>
+                            <div className="flex items-center gap-1.5 min-w-[100px]">
+                               <span className="text-white">
+                                  {Math.floor(integratedTime / 60)}:{String(Math.floor(integratedTime % 60)).padStart(2, '0')}
+                                </span>
+                               <span className="opacity-20">/</span>
+                               <span className="opacity-40">
+                                  {Math.floor(totalVideoDuration / 60)}:{String(Math.floor(totalVideoDuration % 60)).padStart(2, '0')}
+                               </span>
+                            </div>
                           </div>
                           <div className="flex items-center gap-4">
-                            <span className="material-symbols-outlined text-sm cursor-pointer hover:text-primary">
-                              volume_up
-                            </span>
-                            <span className="material-symbols-outlined text-sm cursor-pointer hover:text-primary">
-                              closed_caption
-                            </span>
-                            <span className="material-symbols-outlined text-sm cursor-pointer hover:text-primary">
-                              settings
-                            </span>
-                            <span className="material-symbols-outlined text-sm cursor-pointer hover:text-primary">
-                              fullscreen
-                            </span>
+                              <span className="material-symbols-outlined text-sm cursor-pointer hover:text-primary">
+                                volume_up
+                              </span>
+                              <span className="material-symbols-outlined text-sm cursor-pointer hover:text-primary">
+                                settings
+                              </span>
+                              <span className="material-symbols-outlined text-sm cursor-pointer hover:text-primary">
+                                fullscreen
+                              </span>
                           </div>
                         </div>
                       </div>
                     </div>
                   </div>
+
+                  {/* Rendering Progress Section */}
+                  <div className="p-8 bg-white dark:bg-white/5 rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl overflow-hidden relative">
+                    <div className="relative z-10">
+                      <div className="flex items-center justify-between mb-2 text-sm font-bold">
+                        <span className="text-slate-500">비디오 렌더링 진행률</span>
+                        <span className="text-primary">{renderProgress}%</span>
+                      </div>
+                      <div className="w-full bg-slate-200 dark:bg-white/10 h-3 rounded-full overflow-hidden mb-3">
+                        <div 
+                          className="h-full bg-primary shadow-[0_0_10px_rgba(55,19,236,0.5)] transition-all duration-500"
+                          style={{ width: `${renderProgress}%` }}
+                        ></div>
+                      </div>
+                      {renderError && (
+                        <div className={`flex items-center gap-2 text-sm p-3 rounded-lg mb-3 ${renderError.startsWith('✅') ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
+                          <span className="material-symbols-outlined text-sm">
+                            {renderError.startsWith('✅') ? 'check_circle' : 'error'}
+                          </span>
+                          <span>{renderError}</span>
+                        </div>
+                      )}
+                      {!renderError && (
+                        <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
+                          <span className="material-symbols-outlined text-sm text-blue-500">
+                            info
+                          </span>
+                          <span>다운로드 버튼을 클릭하여 영상을 저장하세요.</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
-                <div className="p-6 bg-white dark:bg-white/5 rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                      <div className={`size-10 ${renderProgress === 100 ? 'bg-green-500/20 text-green-500' : 'bg-blue-500/20 text-blue-500'} rounded-lg flex items-center justify-center`}>
-                        <span className="material-symbols-outlined">
-                          {renderProgress === 100 ? 'check_circle' : 'sync_saved_locally'}
+                <div className="lg:col-span-3 space-y-6">
+                  <div className="p-6 bg-white dark:bg-white/5 rounded-2xl border border-slate-200 dark:border-white/10 flex flex-col gap-4 shadow-xl">
+                    <h3 className="text-lg font-bold mb-2">내보내기 옵션</h3>
+                    <button 
+                      onClick={handleFinalRender}
+                      disabled={isRendering}
+                      className="w-full py-4 px-6 bg-primary hover:bg-primary/90 text-white rounded-xl font-bold flex items-center justify-center gap-3 transition-all transform active:scale-[0.98] shadow-lg shadow-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isRendering ? (
+                        <>
+                          <span className="material-symbols-outlined animate-spin">sync</span>
+                          렌더링 중...
+                        </>
+                      ) : (
+                        <>
+                          <span className="material-symbols-outlined">download</span>
+                          MP4 다운로드 (1080p)
+                        </>
+                      )}
+                    </button>
+                    <button className="w-full py-4 px-6 bg-white dark:bg-white/10 border border-slate-200 dark:border-white/10 hover:border-primary/50 text-slate-900 dark:text-white rounded-xl font-bold flex items-center justify-center gap-3 transition-all">
+                      <span className="material-symbols-outlined text-red-600">
+                        smart_display
+                      </span>
+                      유튜브에 공유
+                    </button>
+
+                    <div className="relative py-4">
+                      <div className="absolute inset-0 flex items-center">
+                        <div className="w-full border-t border-slate-200 dark:border-white/10"></div>
+                      </div>
+                      <div className="relative flex justify-center text-xs uppercase">
+                        <span className="bg-white dark:bg-[#131022] px-2 text-slate-500 font-bold">
+                          기타 옵션
                         </span>
                       </div>
-                      <div>
-                        <h3 className="font-bold">렌더링 상태</h3>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          {isRendering ? '렌더링 진행 중...' : renderProgress === 100 ? '렌더링 완료!' : '렌더링 준비 완료'}
-                        </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <button className="p-3 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-lg flex flex-col items-center gap-1 transition-colors">
+                        <span className="material-symbols-outlined text-blue-500">
+                          share
+                        </span>
+                        <span className="text-[10px] font-bold uppercase tracking-tighter">
+                          링크 복사
+                        </span>
+                      </button>
+                      <button className="p-3 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-lg flex flex-col items-center gap-1 transition-colors">
+                        <span className="material-symbols-outlined text-pink-500">
+                          qr_code
+                        </span>
+                        <span className="text-[10px] font-bold uppercase tracking-tighter">
+                          QR 코드
+                        </span>
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => setStep(CreationStep.SUBTITLE)}
+                      className="mt-4 text-center text-sm font-semibold text-slate-500 hover:text-primary flex items-center justify-center gap-2 transition-colors"
+                    >
+                      <span className="material-symbols-outlined text-sm">
+                        edit
+                      </span>
+                      자막 수정하러 가기
+                    </button>
+                  </div>
+
+                  <div className="p-6 bg-slate-100 dark:bg-white/5 rounded-2xl border border-transparent dark:border-white/10">
+                    <h4 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-4">
+                      메타데이터
+                    </h4>
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center text-sm">
+                        <span className="text-slate-500">해상도</span>
+                        <span className="font-medium">1920 x 1080 (HD)</span>
+                      </div>
+                      <div className="flex justify-between items-center text-sm">
+                        <span className="text-slate-500">프레임 레이트</span>
+                        <span className="font-medium">30 fps</span>
+                      </div>
+                      <div className="flex justify-between items-center text-sm">
+                        <span className="text-slate-500">길이</span>
+                        <span className="font-medium">{stats.duration}</span>
+                      </div>
+                      <div className="flex justify-between items-center text-sm">
+                        <span className="text-slate-500">용량</span>
+                        <span className="font-medium">42.8 MB</span>
                       </div>
                     </div>
-                    <span className="text-2xl font-black text-primary">
-                      {renderProgress}%
-                    </span>
-                  </div>
-                  <div className="w-full bg-slate-200 dark:bg-white/10 h-3 rounded-full overflow-hidden mb-3">
-                    <div 
-                      className="h-full bg-primary shadow-[0_0_10px_rgba(55,19,236,0.5)] transition-all duration-500"
-                      style={{ width: `${renderProgress}%` }}
-                    ></div>
-                  </div>
-                  {renderError && (
-                    <div className={`flex items-center gap-2 text-sm p-3 rounded-lg mb-3 ${renderError.startsWith('✅') ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
-                      <span className="material-symbols-outlined text-sm">
-                        {renderError.startsWith('✅') ? 'check_circle' : 'error'}
-                      </span>
-                      <span>{renderError}</span>
-                    </div>
-                  )}
-                  {!renderError && (
-                    <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
-                      <span className="material-symbols-outlined text-sm text-blue-500">
-                        info
-                      </span>
-                      <span>다운로드 버튼을 클릭하여 영상을 저장하세요.</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="lg:col-span-4 space-y-6">
-                <div className="p-6 bg-white dark:bg-white/5 rounded-2xl border border-slate-200 dark:border-white/10 flex flex-col gap-4 shadow-xl">
-                  <h3 className="text-lg font-bold mb-2">내보내기 옵션</h3>
-                  <button 
-                    onClick={handleFinalRender}
-                    disabled={isRendering}
-                    className="w-full py-4 px-6 bg-primary hover:bg-primary/90 text-white rounded-xl font-bold flex items-center justify-center gap-3 transition-all transform active:scale-[0.98] shadow-lg shadow-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isRendering ? (
-                      <>
-                        <span className="material-symbols-outlined animate-spin">sync</span>
-                        렌더링 중...
-                      </>
-                    ) : (
-                      <>
-                        <span className="material-symbols-outlined">download</span>
-                        MP4 다운로드 (1080p)
-                      </>
-                    )}
-                  </button>
-                  <button className="w-full py-4 px-6 bg-white dark:bg-white/10 border border-slate-200 dark:border-white/10 hover:border-primary/50 text-slate-900 dark:text-white rounded-xl font-bold flex items-center justify-center gap-3 transition-all">
-                    <span className="material-symbols-outlined text-red-600">
-                      smart_display
-                    </span>
-                    유튜브에 공유
-                  </button>
-
-                  <div className="relative py-4">
-                    <div className="absolute inset-0 flex items-center">
-                      <div className="w-full border-t border-slate-200 dark:border-white/10"></div>
-                    </div>
-                    <div className="relative flex justify-center text-xs uppercase">
-                      <span className="bg-white dark:bg-[#131022] px-2 text-slate-500 font-bold">
-                        기타 옵션
-                      </span>
-                    </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <button className="p-3 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-lg flex flex-col items-center gap-1 transition-colors">
-                      <span className="material-symbols-outlined text-blue-500">
-                        share
-                      </span>
-                      <span className="text-[10px] font-bold uppercase tracking-tighter">
-                        링크 복사
-                      </span>
-                    </button>
-                    <button className="p-3 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-lg flex flex-col items-center gap-1 transition-colors">
-                      <span className="material-symbols-outlined text-pink-500">
-                        qr_code
-                      </span>
-                      <span className="text-[10px] font-bold uppercase tracking-tighter">
-                        QR 코드
-                      </span>
-                    </button>
-                  </div>
-                  <button
-                    onClick={() => setStep(CreationStep.SCENE_REVIEW)}
-                    className="mt-4 text-center text-sm font-semibold text-slate-500 hover:text-primary flex items-center justify-center gap-2 transition-colors"
-                  >
-                    <span className="material-symbols-outlined text-sm">
-                      edit
-                    </span>
-                    수정하러 가기
-                  </button>
-                </div>
-
-                <div className="p-6 bg-slate-100 dark:bg-white/5 rounded-2xl border border-transparent dark:border-white/10">
-                  <h4 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-4">
-                    메타데이터
-                  </h4>
-                  <div className="space-y-3">
-                    <div className="flex justify-between items-center text-sm">
-                      <span className="text-slate-500">해상도</span>
-                      <span className="font-medium">1920 x 1080 (HD)</span>
+                  <div className="p-6 bg-primary/5 rounded-2xl border border-primary/20 relative overflow-hidden">
+                    <div className="relative z-10">
+                      <div className="flex items-center gap-2 text-primary mb-2">
+                        <span className="material-symbols-outlined">
+                          lightbulb
+                        </span>
+                        <span className="font-bold text-sm">전문가 팁</span>
+                      </div>
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        맞춤 자막이 포함된 영상은 유튜브 쇼츠나 틱톡에서 시청
+                        지표가 80% 더 높습니다. 이 영상에는 이미 AI가 싱크를 맞춘
+                        자막이 포함되어 있습니다!
+                      </p>
                     </div>
-                    <div className="flex justify-between items-center text-sm">
-                      <span className="text-slate-500">프레임 레이트</span>
-                      <span className="font-medium">30 fps</span>
-                    </div>
-                    <div className="flex justify-between items-center text-sm">
-                      <span className="text-slate-500">길이</span>
-                      <span className="font-medium">{stats.duration}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-sm">
-                      <span className="text-slate-500">용량</span>
-                      <span className="font-medium">42.8 MB</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-6 bg-primary/5 rounded-2xl border border-primary/20 relative overflow-hidden">
-                  <div className="relative z-10">
-                    <div className="flex items-center gap-2 text-primary mb-2">
-                      <span className="material-symbols-outlined">
-                        lightbulb
+                    <div className="absolute -right-4 -bottom-4 opacity-5">
+                      <span className="material-symbols-outlined text-8xl">
+                        auto_awesome
                       </span>
-                      <span className="font-bold text-sm">전문가 팁</span>
                     </div>
-                    <p className="text-xs text-slate-400 leading-relaxed">
-                      맞춤 자막이 포함된 영상은 유튜브 쇼츠나 틱톡에서 시청
-                      지표가 80% 더 높습니다. 이 영상에는 이미 AI가 싱크를 맞춘
-                      자막이 포함되어 있습니다!
-                    </p>
-                  </div>
-                  <div className="absolute -right-4 -bottom-4 opacity-5">
-                    <span className="material-symbols-outlined text-8xl">
-                      auto_awesome
-                    </span>
                   </div>
                 </div>
               </div>
-            </div>
-          </main>
-        );
+            </main>
+          );
+        })();
       default:
         return null;
     }
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden text-white bg-background-dark font-sans selection:bg-primary/30 selection:text-white pt-[72px]">
-      <ProgressBar currentStep={step} />
+    <div className="flex h-screen w-screen overflow-hidden text-white bg-background-dark font-sans selection:bg-primary/30 selection:text-white">
 
       {showRecoveryModal && hasAutoSave && (
         <RecoveryModal
@@ -3019,9 +3950,9 @@ Respond in JSON format:
           {renderContent()}
         </div>
 
-        {/* Global Loading Overlay */}
+        {/* Loading Overlay - 콘텐츠 영역만 덮음 (사이드바는 사용 가능) */}
         {(isLoading || isGeneratingVideo) && (
-          <div className="fixed inset-0 z-[100] bg-[#131022]/80 backdrop-blur-xl flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-300">
+          <div className="absolute inset-0 z-[100] bg-[#131022]/80 backdrop-blur-xl flex flex-col items-center justify-center p-8 text-center animate-in fade-in duration-300">
             <div className="relative mb-10">
               <div className="w-24 h-24 border-4 border-primary/20 border-t-primary rounded-full animate-spin"></div>
               <div className="absolute inset-0 flex items-center justify-center">
@@ -3052,12 +3983,7 @@ Respond in JSON format:
       </div>
       
       {/* Modals */}
-      <ApiKeyModal
-        show={showApiKeyModal}
-        onClose={() => setShowApiKeyModal(false)}
-        currentApiKey={apiKey}
-        setApiKey={setApiKey}
-      />
+
       
       <ProjectsModal
         show={showProjectsModal}

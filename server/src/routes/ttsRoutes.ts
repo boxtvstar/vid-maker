@@ -5,13 +5,18 @@ import {
   getTTSStatus,
   getTTSResult,
   getSupportedVoices,
-  generateBatchTTS
+  generateBatchTTS,
+  previewVoice,
+  transcribeAudio
 } from '../controllers/ttsController.js';
 
 const router = Router();
 
 // 음성 목록 조회
 router.get('/voices', getSupportedVoices);
+
+// 음성 미리듣기 (짧은 샘플)
+router.post('/preview', previewVoice);
 
 // TTS 동기 생성 (짧은 텍스트)
 router.post('/generate', generateTTS);
@@ -21,6 +26,9 @@ router.post('/submit', submitTTS);
 
 // 일괄 TTS 생성
 router.post('/batch', generateBatchTTS);
+
+// Whisper 음성 전사 (자막 자동 싱크)
+router.post('/transcribe', transcribeAudio);
 
 // 상태 확인
 router.get('/status/:requestId', getTTSStatus);
