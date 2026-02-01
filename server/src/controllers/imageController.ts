@@ -21,7 +21,9 @@ export const generateImageFromPrompt = async (req: Request, res: Response) => {
     }
 
     // 스타일 프리픽스를 프롬프트에 합치기
-    const styledPrompt = style ? `${style}, ${prompt}` : prompt;
+    // 텍스트 포함 방지를 위한 네거티브 프롬프트 및 지시사항 추가
+    const noTextInstruction = "Do not include any text, letters, words, subtitles, watermarks, or typography in the image. The image should be purely visual.";
+    const styledPrompt = `${noTextInstruction} ${style ? `${style}, ${prompt}` : prompt}`;
 
     console.log(`[IMG] Generating image (grok-imagine), prompt="${styledPrompt.substring(0, 80)}...", ratio=${aspect_ratio}`);
 

@@ -51,6 +51,13 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    falConfigured: !!process.env.FAL_KEY
+  });
+});
+
 // Error handling
 app.use(errorHandler);
 

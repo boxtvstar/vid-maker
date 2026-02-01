@@ -7,12 +7,13 @@ interface ProgressBarProps {
 }
 
 const STEP_INFO = [
-  { step: CreationStep.TOPIC, label: '주제', icon: 'lightbulb' },
-  { step: CreationStep.SCRIPT, label: '대본', icon: 'description' },
-  { step: CreationStep.CUT_SELECTION, label: '시각화', icon: 'image' },
-  { step: CreationStep.MOTION, label: '모션', icon: 'animation' },
+  { step: CreationStep.TOPIC, label: '기획', icon: 'edit_note' },
+  { step: CreationStep.SCRIPT, label: '구성', icon: 'view_timeline' },
+  { step: CreationStep.CUT_SELECTION, label: '이미지', icon: 'image' },
+  { step: CreationStep.MOTION, label: '영상', icon: 'movie_filter' },
   { step: CreationStep.AUDIO_STYLE, label: '오디오', icon: 'graphic_eq' },
-  { step: CreationStep.FINAL, label: '완료', icon: 'check_circle' },
+  { step: CreationStep.SUBTITLE, label: '자막편집', icon: 'subtitles' },
+  { step: CreationStep.FINAL, label: '완료', icon: 'movie' },
 ];
 
 export const ProgressBar: React.FC<ProgressBarProps> = ({ currentStep, onStepClick }) => {

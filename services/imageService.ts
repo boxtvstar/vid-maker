@@ -37,3 +37,12 @@ export async function generateFalImage(request: ImageRequest): Promise<string> {
 
   return data.imageUrl;
 }
+
+export async function checkServerHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/health`);
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
