@@ -1,8 +1,9 @@
 import type { VideoProvider } from './VideoProvider.js';
 import { FalKlingProvider } from './FalKlingProvider.js';
 import { FalKlingStandardProvider } from './FalKlingStandardProvider.js';
+import { FalGrokVideoProvider } from './FalGrokVideoProvider.js';
 
-export type ProviderType = 'kling' | 'kling-standard' | 'veo' | 'sora';
+export type ProviderType = 'kling' | 'kling-standard' | 'grok' | 'veo' | 'sora';
 
 /**
  * Provider Factory
@@ -23,6 +24,9 @@ export class ProviderFactory {
         case 'kling-standard':
           this.providers.set(type, new FalKlingStandardProvider());
           break;
+        case 'grok':
+          this.providers.set(type, new FalGrokVideoProvider());
+          break;
         // 향후 추가
         // case 'veo':
         //   this.providers.set(type, new FalVeoProvider());
@@ -41,6 +45,6 @@ export class ProviderFactory {
    * 지원하는 Provider 목록
    */
   static getSupportedProviders(): ProviderType[] {
-    return ['kling', 'kling-standard']; // 향후 veo, sora 추가 예정
+    return ['kling', 'kling-standard', 'grok']; // 향후 veo, sora 추가 예정
   }
 }

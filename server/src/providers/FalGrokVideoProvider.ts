@@ -2,27 +2,34 @@ import { fal } from '@fal-ai/client';
 import type { VideoProvider, VideoGenerationRequest, VideoGenerationResult } from './VideoProvider.js';
 
 /**
- * fal.ai Kling v1.6 Standard Provider
- * Image-to-Video 변환을 위한 Standard 티어 Provider 구현
+ * fal.ai xAI Grok Imagine Video Provider
+ * Image-to-Video 변환을 위한 Provider 구현
+ * Model ID: xai/grok-imagine-video/image-to-video
  */
-export class FalKlingStandardProvider implements VideoProvider {
-  readonly name = 'kling-v1.6-standard';
-  readonly modelId = 'fal-ai/kling-video/v1.6/standard/image-to-video';
-  readonly supportedDurations = ['5', '10'];
-  readonly supportedAspectRatios = ['16:9', '9:16', '1:1'];
+export class FalGrokVideoProvider implements VideoProvider {
+  readonly name = 'grok-imagine-video';
+  readonly modelId = 'xai/grok-imagine-video/image-to-video';
+  readonly supportedDurations = ['5', '9']; // API supports integer duration, default 6. Let's map 5->5, 10->9 (max) or just pass integer.
+  readonly supportedAspectRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 
   /**
    * 영상 생성 요청 제출
    */
   async submitGeneration(request: VideoGenerationRequest): Promise<{ requestId: string }> {
+    // duration mapping: App uses '5' or '10'.
+    // Grok uses integer seconds.
+    const durationInt = request.duration === '10' ? 9 : 5; // Use 5 for short, 9 for long (if max is 9? Docs don't say explicitly but 5-10 is common range. Default is 6)
+    
+    // aspect_ratio can be 'auto' or specific.
+    const aspectRatio = request.aspectRatio || '16:9';
+
     const result = await fal.queue.submit(this.modelId, {
       input: {
         image_url: request.imageUrl,
         prompt: this.buildPrompt(request),
-        duration: request.duration || '5',
-        aspect_ratio: request.aspectRatio || '16:9',
-        negative_prompt: request.negativePrompt || 'blur, distort, low quality, watermark',
-        cfg_scale: 0.5
+        duration: durationInt,
+        aspect_ratio: aspectRatio,
+        resolution: "720p" 
       }
     });
 
@@ -50,17 +57,12 @@ export class FalKlingStandardProvider implements VideoProvider {
    */
   async getResult(requestId: string): Promise<VideoGenerationResult> {
     try {
+      // Grok output schema: { video: { url: ... } }
       const result = await fal.queue.result(this.modelId, { requestId }) as any;
 
-      // 디버깅: 응답 구조 확인
-      console.log('Kling Standard result structure:', JSON.stringify(result, null, 2));
+      console.log('Grok Video result structure:', JSON.stringify(result, null, 2));
 
-      // 여러 가능한 경로에서 video URL 찾기
-      const videoUrl = result.video?.url
-        || result.data?.video?.url
-        || result.output?.video?.url
-        || result.data?.url
-        || result.url;
+      const videoUrl = result.video?.url || result.data?.video?.url;
 
       if (!videoUrl) {
         console.error('No video URL found in result:', result);
@@ -85,32 +87,32 @@ export class FalKlingStandardProvider implements VideoProvider {
    * 모션 타입을 프롬프트에 반영
    */
   private buildPrompt(request: VideoGenerationRequest): string {
-    const originalPrompt = request.prompt;
-    let motionInstruction = '';
+    let prompt = request.prompt;
 
     if (request.motionType && request.motionType !== 'auto') {
-      // 관리자 설정 규칙 우선 사용
-      const rule = request.promptRules?.[request.motionType];
-      if (rule) {
-        motionInstruction = rule;
+      const motionMap: Record<string, string> = {
+        'zoom_in': 'Camera zooms in',
+        'zoom_out': 'Camera zooms out',
+        'pan_left': 'Camera pans left',
+        'pan_right': 'Camera pans right',
+        'static': 'Static camera, minimal movement',
+        'Cinematic Slow Motion': 'Cinematic slow motion'
+      };
+
+      const motionInstruction = motionMap[request.motionType];
+      if (motionInstruction) {
+        prompt = `${motionInstruction}. ${prompt}`;
       }
     }
-
-    // 템플릿 적용 (기본값: 모션 + 프롬프트)
-    const template = request.promptTemplate || '{motion}. {prompt}';
     
-    // 변수 치환
-    let finalPrompt = template
-      .replace('{prompt}', originalPrompt)
-      .replace('{motion}', motionInstruction);
-    
-    // 정리: 모션이 비어있을 때 생기는 불필요한 점(.)이나 공백 제거
-    // 예: ". Prompt" -> "Prompt"
-    if (!motionInstruction) {
-      finalPrompt = finalPrompt.replace(/^\.\s+/, '').replace(/^\./, '');
+    // Add prompt template logic if needed, but for now simple concatenation
+    if (request.promptTemplate) {
+        // e.g. "{motion}. {prompt}"
+        // We already handled motion via buildPrompt, but if the template is complex we might need to revisit.
+        // For now, assume the user wants the motion instruction integrated.
     }
-    
-    return finalPrompt.trim();
+
+    return prompt;
   }
 
   /**
@@ -139,7 +141,7 @@ export class FalKlingStandardProvider implements VideoProvider {
       return Math.max(5, 30 - position * 5);
     }
     if (status.status === 'IN_PROGRESS') {
-      return 60;
+      return 50; 
     }
     return 0;
   }

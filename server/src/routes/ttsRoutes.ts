@@ -7,13 +7,17 @@ import {
   getSupportedVoices,
   generateBatchTTS,
   previewVoice,
-  transcribeAudio
+  transcribeAudio,
+  getVoiceInfo
 } from '../controllers/ttsController.js';
 
 const router = Router();
 
 // 음성 목록 조회
 router.get('/voices', getSupportedVoices);
+
+// Voice 상세 정보 가져오기 (관리자용) - ElevenLabs API 직접 조회를 위함
+router.get('/voice/:voiceId', getVoiceInfo);
 
 // 음성 미리듣기 (짧은 샘플)
 router.post('/preview', previewVoice);

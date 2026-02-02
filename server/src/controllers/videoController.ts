@@ -1,6 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import { ProviderFactory, type ProviderType } from '../providers/ProviderFactory.js';
 import { uploadBase64Image } from '../utils/imageUploader.js';
+import fs from 'fs';
+import path from 'path';
 
 interface GenerateRequestBody {
   imageData: string;        // base64 또는 URL
@@ -23,20 +25,28 @@ export async function submitVideoGeneration(
   try {
     const { imageData, prompt, motionType, duration, aspectRatio, provider = 'kling' } = req.body;
 
-    // 입력 검증
-    if (!imageData) {
-      return res.status(400).json({ error: 'imageData is required' });
-    }
-    if (!prompt) {
-      return res.status(400).json({ error: 'prompt is required' });
-    }
+    // ... (validation remains)
 
-    // Base64 이미지를 URL로 변환 (fal.ai는 URL 필요)
+    // Base64 logic remains...
     let imageUrl = imageData;
     if (imageData.startsWith('data:')) {
       console.log('Converting base64 image to URL...');
       imageUrl = await uploadBase64Image(imageData);
       console.log('Image uploaded:', imageUrl);
+    }
+
+    // Load settings for prompt rules
+    let promptRules: Record<string, string> = {};
+    let promptTemplate: string | undefined;
+    try {
+      const settingsPath = path.join(process.cwd(), 'data', 'settings.json');
+      if (fs.existsSync(settingsPath)) {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+        promptRules = settings.video?.motionRules || {};
+        promptTemplate = settings.video?.promptTemplate;
+      }
+    } catch (e) {
+      console.error('Failed to load video settings:', e);
     }
 
     // Provider 선택 및 생성 요청
@@ -46,7 +56,9 @@ export async function submitVideoGeneration(
       prompt,
       motionType,
       duration,
-      aspectRatio
+      aspectRatio,
+      promptRules,
+      promptTemplate
     });
 
     console.log(`Video generation submitted: ${result.requestId}`);

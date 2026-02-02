@@ -8,6 +8,8 @@ export interface VideoGenerationRequest {
   aspectRatio?: '16:9' | '9:16' | '1:1';
   motionType?: string;        // 모션 타입 힌트
   negativePrompt?: string;    // 제외할 요소
+  promptRules?: Record<string, string>; // 모션 타입별 변환 규칙 (관리자 설정)
+  promptTemplate?: string;    // 모션과 프롬프트 결합 템플릿
 }
 
 /**

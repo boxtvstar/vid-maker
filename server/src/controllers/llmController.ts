@@ -14,7 +14,7 @@ export const generateLLMResponse = async (req: Request, res: Response) => {
     const {
       prompt,
       system_prompt,
-      model = 'google/gemini-2.5-flash',
+      model = 'google/gemini-2.0-flash-001',
       temperature = 0.7,
       max_tokens = 800,
     } = req.body as LLMRequestBody;
@@ -30,7 +30,10 @@ export const generateLLMResponse = async (req: Request, res: Response) => {
     // fal.ai 공식 문서 기준: fal.subscribe("openrouter/router", { input, logs, onQueueUpdate })
     const result = await fal.subscribe("openrouter/router", {
       input: {
-        prompt: system_prompt ? `${system_prompt}\n\n${prompt}` : prompt,
+        // System Prompt를 더 명확하게 구분하여 전달
+        prompt: system_prompt 
+          ? `[SYSTEM INSTRUCTION START]\n${system_prompt}\n[SYSTEM INSTRUCTION END]\n\n[USER REQUEST START]\n${prompt}\n[USER REQUEST END]` 
+          : prompt,
         model,
         temperature,
         max_tokens,

@@ -243,7 +243,7 @@ export async function transcribeAudio(
       input: {
         audio_url: audioUrl,
         task: 'transcribe',
-        language: language || 'ko',
+        language: (language || 'ko') as any,
         chunk_level: 'segment',
         version: '3',
       },
@@ -268,6 +268,80 @@ export async function transcribeAudio(
 
   } catch (error) {
     console.error('Whisper transcription error:', error);
+    next(error);
+  }
+}
+
+/**
+ * ElevenLabs Voice 정보 가져오기
+ * GET /api/tts/voice/:voiceId
+ */
+export async function getVoiceInfo(
+  req: Request<{ voiceId: string }>,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const { voiceId } = req.params;
+    const apiKey = process.env.ELEVENLABS_API_KEY;
+    
+    if (!apiKey) {
+      return res.status(503).json({ 
+        error: '⚠️ 정보 불러오기 실패: 서버에 ElevenLabs Key가 설정되지 않아 상세 정보를 가져올 수 없습니다. 하지만 입력하신 ID로 음성 생성은 정상적으로 가능하므로, 이름과 성격을 직접 입력하고 저장하시면 됩니다.' 
+      });
+    }
+
+    const response = await fetch(`https://api.elevenlabs.io/v1/voices/${voiceId}`, {
+      method: 'GET',
+      headers: {
+        'xi-api-key': apiKey
+      }
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('ElevenLabs API Error:', response.status, errText);
+      
+      let clientMsg = `ElevenLabs API 오류 (${response.status})`;
+      if (response.status === 401) {
+        clientMsg = '서버의 ElevenLabs API Key가 유효하지 않습니다. .env 설정을 확인하세요.';
+      } else if (response.status === 404) {
+        clientMsg = '해당 Voice ID를 찾을 수 없습니다. 아이디를 다시 확인해주세요.';
+      } else {
+         try {
+             const errJson = JSON.parse(errText);
+             if (errJson.detail && errJson.detail.message) clientMsg = errJson.detail.message;
+         } catch {}
+      }
+      
+      return res.status(response.status).json({ error: clientMsg });
+    }
+
+    const data = await response.json();
+    
+    // 라벨 정보 조합 (accent, description, age, gender, use case)
+    const labels = data.labels || {};
+    const descriptionParts = [];
+    if (labels.accent) descriptionParts.push(labels.accent);
+    if (labels.description) descriptionParts.push(labels.description);
+    if (labels.gender) descriptionParts.push(labels.gender);
+    if (labels.age) descriptionParts.push(labels.age);
+    if (labels.use_case) descriptionParts.push(labels.use_case);
+
+    const typeDesc = descriptionParts.length > 0 ? descriptionParts.join(', ') : (data.category || 'Custom Voice');
+
+    res.json({
+      success: true,
+      voice: {
+        id: data.voice_id,
+        name: data.name,
+        type: typeDesc,
+        previewUrl: data.preview_url
+      }
+    });
+
+  } catch (error) {
+    console.error('getVoiceInfo error:', error);
     next(error);
   }
 }

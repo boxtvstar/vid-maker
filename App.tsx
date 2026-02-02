@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 
-import { CreationStep, ScriptBlock, Scene, Voice } from './types';
-import { INITIAL_SCRIPT_BLOCKS, VOICES, MOTION_STYLES } from './constants';
+import { CreationStep, ScriptBlock, Scene, Voice, CharacterProfile } from './types';
+import { INITIAL_SCRIPT_BLOCKS, MOTION_STYLES } from './constants';
 import { saveProject, getProjects, getApiKey, setApiKey as saveApiKey, downloadFile, generateSubtitles, ProjectData, autoSave, loadAutoSave, clearAutoSave, compressImage, apiQueue } from './utils';
 import { VIDEO_TEMPLATES, BGM_OPTIONS, EXPORT_PRESETS } from './templates';
 import { ApiKeyModal, ProjectsModal, TemplatesModal } from './Modals';
@@ -13,16 +13,8 @@ import { generateVideoWithPolling } from './services/videoService';
 import { generateBatchTTS, previewVoiceTTS, transcribeAudio } from './services/ttsService';
 import { generateLLM } from './services/llmService';
 import { generateFalImage, checkServerHealth } from './services/imageService';
-
-const IMAGE_STYLES = [
-  { id: '3d_cartoon', label: '3D Cartoon 2.0', prefix: '3D cartoon character, vibrant colors, expressive facial features, soft lighting, 8k resolution, stylized rendering', previewUrl: 'https://images.unsplash.com/photo-1633511090164-b43840ea1607?w=300&h=300&fit=crop' },
-  { id: 'realistic', label: 'Realistic 2.0', prefix: 'Photorealistic, ultra detailed, 8K UHD, DSLR photography, natural lighting, sharp focus, cinematic composition', previewUrl: 'https://images.unsplash.com/photo-1554151228-14d9def656ec?w=300&h=300&fit=crop' },
-  { id: 'disney', label: 'Disney 2.1', prefix: 'Disney princess style, magical atmosphere, detailed background, glowing lighting, beautiful eyes, fantasy art', previewUrl: 'https://images.unsplash.com/photo-1595675024853-0f3ec9092605?w=300&h=300&fit=crop' },
-  { id: 'pixar', label: 'Pixar', prefix: 'Pixar style 3D animation, cute character design, volumetric lighting, subsurface scattering, vibrant emotional expression', previewUrl: 'https://images.unsplash.com/photo-1618331835717-801e976710b2?w=300&h=300&fit=crop' },
-  { id: 'animals', label: 'Animals / Furry', prefix: 'Cute animal character, Zootopia style, anthropomorphic features, detailed fur texture, expressive eyes', previewUrl: 'https://images.unsplash.com/photo-1589656966895-2f33e7653819?w=300&h=300&fit=crop' },
-  { id: 'illustration', label: 'Illustration', prefix: 'Digital illustration, artistic style, clean lines, vibrant colors, storybook aesthetic', previewUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=300&h=300&fit=crop' },
-  { id: 'zootopia', label: 'Zootopia Style', prefix: 'Zootopia movie style, anthropomorphic animals, detailed clothing, modern city background, 3D render', previewUrl: 'https://images.unsplash.com/photo-1592652426685-6e5aa42d45a9?w=300&h=300&fit=crop' },
-];
+import { AppSettings, fetchSettings } from './services/settingsService';
+import { AdminModal } from './AdminModal';
 
 const LANGUAGES = [
   { code: 'Korean', label: '🇰🇷 한국어' },
@@ -58,8 +50,32 @@ const App: React.FC = () => {
   const [targetDuration, setTargetDuration] = useState('30s');
   const [customDuration, setCustomDuration] = useState('');
   const [manualScript, setManualScript] = useState('');
-  const [characterDescription, setCharacterDescription] = useState("");
+  const [characterProfiles, setCharacterProfiles] = useState<CharacterProfile[]>([
+    { id: 'char-1', name: '주인공', description: '', status: 'active' }
+  ]);
   const [isDarkMode, setIsDarkMode] = useState(true); // Default dark mode
+  const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
+  const [useCharacterProfile, setUseCharacterProfile] = useState(true);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+
+  // Fetch settings on mount
+  useEffect(() => {
+    fetchSettings()
+      .then(data => {
+        setSettings(data);
+        if (data.image.defaultStyle) {
+          setSelectedImageStyle(data.image.defaultStyle);
+        }
+        if (data.audio.defaultVoice && !selectedVoice) {
+          const v = data.audio.voices.find(v => v.id === data.audio.defaultVoice);
+          if (v) setSelectedVoice(v as any);
+        }
+        if (data.video.defaultProvider) {
+          setVideoProvider(data.video.defaultProvider);
+        }
+      })
+      .catch(err => console.error('Failed to load settings:', err));
+  }, []);
 
   // Toggle dark mode class
   useEffect(() => {
@@ -71,12 +87,11 @@ const App: React.FC = () => {
   }, [isDarkMode]);
 
   // 대본 미리보기 상태
-  const [scriptPreview, setScriptPreview] = useState<{synopsis: string, shots: {title: string, content: string}[]} | null>(null);
+  const [scriptPreview, setScriptPreview] = useState<{synopsis: string, shots: {title: string, content: string, visual?: string}[]} | null>(null);
 
   // 2단계 (Shot 설계)용 상태
   const [synopsis, setSynopsis] = useState("");
-  const [shots, setShots] = useState<{id: string, content: string}[]>([]);
-  const [selectedImageStyle, setSelectedImageStyle] = useState('3d_cartoon');
+  const [shots, setShots] = useState<{id: string, content: string, visual?: string}[]>([]);
 
   const [videoLength, setVideoLength] = useState<"shorts" | "long">("shorts");
   const [videoTone, setVideoTone] = useState<
@@ -90,7 +105,8 @@ const App: React.FC = () => {
     INITIAL_SCRIPT_BLOCKS,
   );
   const [scenes, setScenes] = useState<Scene[]>([]);
-  const [selectedVoice, setSelectedVoice] = useState<Voice | null>(VOICES[0]);
+  const [selectedVoice, setSelectedVoice] = useState<Voice | null>(null);
+  const [selectedImageStyle, setSelectedImageStyle] = useState('3d_cartoon');
   const [selectedMotion, setSelectedMotion] = useState(MOTION_STYLES[0].id);
   const [selectedBgm, setSelectedBgm] = useState("Cinematic");
   const [isLoading, setIsLoading] = useState(false);
@@ -124,7 +140,7 @@ const App: React.FC = () => {
   const [isBitSyncEnabled, setIsBitSyncEnabled] = useState(true);
 
   // Video Provider states
-  const [videoProvider, setVideoProvider] = useState<'kling' | 'kling-standard' | 'veo' | 'sora'>('kling');
+  const [videoProvider, setVideoProvider] = useState<'kling' | 'kling-standard' | 'grok' | 'veo' | 'sora'>('kling');
   const [showModelSelectModal, setShowModelSelectModal] = useState(false);
   const [motionError, setMotionError] = useState<string | null>(null);
 
@@ -647,7 +663,8 @@ const App: React.FC = () => {
 
   // 2단계 진입 시 Shot 자동 생성 로직
   useEffect(() => {
-    if (step === CreationStep.SCRIPT && scenes.length > 0) {
+    // Only run if we have scenes but NO shots (e.g. loading from save), otherwise we overwrite user edits
+    if (step === CreationStep.SCRIPT && scenes.length > 0 && shots.length === 0) {
       // 1. 시놉시스 자동 생성
       const summary = topic || scenes[0].content.substring(0, 50) + "...";
       setSynopsis(summary);
@@ -726,10 +743,30 @@ const App: React.FC = () => {
 
     try {
       const duration = targetDuration === 'custom' ? customDuration : targetDuration;
+      
+      // 글자수 제한 매핑
+      const charLimitMap: Record<string, string> = {
+        '30s': '전체 글자수(공백 포함)를 **150자~200자** 이내로 작성하세요.',
+        '60s': '전체 글자수(공백 포함)를 **300자~450자** 이내로 작성하세요.',
+        'short': '전체 글자수(공백 포함)를 **800자~1,300자** 이내로 작성하세요. (약 15~25개 장면)',
+        'medium': '전체 글자수(공백 포함)를 **1,500자~2,500자** 이내로 작성하세요. (약 30~50개 장면)',
+      };
+      
+      const shotCountMap: Record<string, string> = {
+        '30s': '장면(shots)은 5~7개 정도로 구성하세요.',
+        '60s': '장면(shots)은 8~12개 정도로 구성하세요.',
+        'short': '장면(shots)은 15~25개 정도로 풍부하게 구성하세요.',
+        'medium': '장면(shots)은 30~50개 정도로 매우 상세하게 구성하세요.',
+      };
 
-      const systemPrompt = `당신은 유튜브 영상 대본 전문 작가입니다.
-사용자가 제공하는 주제로 ${duration} 분량의 유튜브 영상 대본을 작성하세요.
-언어: ${targetLanguage}
+      const charLimit = charLimitMap[targetDuration] || '';
+      const shotCountInstruction = shotCountMap[targetDuration] || '';
+
+      const systemPromptTemplate = settings?.script.systemPrompt || `당신은 유튜브 영상 대본 전문 작가입니다.
+사용자가 제공하는 주제로 {duration} 분량의 유튜브 영상 대본을 작성하세요.
+언어: {language}
+{char_limit}
+{shot_count_instruction}
 
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트는 포함하지 마세요:
 {
@@ -737,20 +774,27 @@ const App: React.FC = () => {
   "shots": [
     { "title": "장면 제목", "content": "해당 장면의 내레이션/대사 텍스트" }
   ]
-}
+}`;
 
-규칙:
-- shots는 3~8개로 구성
-- 각 shot의 content는 자연스러운 내레이션 문장으로 작성하되, **반드시 30자 이내**로 짧게 끊어서 작성할 것
+      const rules = settings?.script.rules || `- shots는 3~10개로 구성 (길이에 맞게 조절)
+- 각 shot의 content는 자연스러운 내레이션 문장으로 작성
 - 시청자의 관심을 끄는 인트로와 마무리 포함
 - JSON만 출력하고 마크다운 코드블록이나 설명을 붙이지 마세요`;
 
+      const fullPrompt = `${systemPromptTemplate}\n\n규칙:\n${rules}`;
+
+      const systemPrompt = fullPrompt
+        .replace('{duration}', duration)
+        .replace('{language}', targetLanguage)
+        .replace('{char_limit}', charLimit)
+        .replace('{shot_count_instruction}', shotCountInstruction);
+
       const output = await generateLLM({
-        prompt: `주제: ${topic}`,
+        prompt: `주제: ${topic}\n주의: 작성할 장면 수에 대한 지침을 엄격히 준수하세요(반드시 ${shotCountInstruction}에 맞게 생성).`,
         system_prompt: systemPrompt,
-        model: 'google/gemini-2.5-flash',
-        temperature: 0.7,
-        max_tokens: 800,
+        model: settings?.script.model || 'google/gemini-2.0-flash-001',
+        temperature: settings?.script.temperature || 0.7,
+        max_tokens: settings?.script.maxTokens || 4000,
       });
 
       // JSON 파싱 (코드블록 래핑 제거)
@@ -762,12 +806,15 @@ const App: React.FC = () => {
       }
 
       // 미리보기 상태에 저장 (바로 이동하지 않음)
+      const finalShots = parsed.shots.map((shot: any, idx: number) => ({
+        title: shot.title || `장면 ${idx + 1}`,
+        content: shot.content || shot.text || '',
+        visual: shot.visual || '',
+      }));
+
       setScriptPreview({
         synopsis: parsed.synopsis || topic,
-        shots: parsed.shots.map((shot: any, idx: number) => ({
-          title: shot.title || `장면 ${idx + 1}`,
-          content: shot.content || shot.text || '',
-        })),
+        shots: finalShots,
       });
     } catch (error: any) {
       console.error("Script generation failed", error);
@@ -778,8 +825,8 @@ const App: React.FC = () => {
     }
   };
 
-  // 대본 미리보기 확정 → 대본 단계로 이동
-  const handleConfirmPreview = () => {
+  // 대본 미리보기 확정 → 대본 단계로 이동 (캐릭터 자동 분석 포함)
+  const handleConfirmPreview = async () => {
     if (!scriptPreview) return;
 
     setSynopsis(scriptPreview.synopsis);
@@ -787,6 +834,7 @@ const App: React.FC = () => {
     const newShots = scriptPreview.shots.map((shot, idx) => ({
       id: `shot-${Date.now()}-${idx}`,
       content: shot.content,
+      visual: shot.visual || '',
     }));
     setShots(newShots);
 
@@ -794,16 +842,89 @@ const App: React.FC = () => {
       id: idx + 1,
       title: shot.title,
       content: shot.content,
+      visual: shot.visual || '',
     }));
     setScriptBlocks(newBlocks);
 
-    setScriptPreview(null);
     setStep(CreationStep.SCRIPT);
+
+    try {
+      const shotsText = scriptPreview.shots.map((s, i) => `Shot ${i+1}: ${s.content}`).join('\n');
+      
+      const charPrompt = `너는 대본 분석 및 캐릭터 디자이너 AI이다.
+아래 대본(Shot List)을 보고 다음 두 가지 작업을 수행하라.
+
+작업 1: 주요 등장인물(Characters) 추출
+- 대본 전체를 관통하는 주요 인물 1~3명 추출
+- 각 캐릭터의 'name' (한글)과 'description' (시각 묘사, 영어) 작성
+
+작업 2: 대본 명확화 (Rewrite Shots)
+- 각 Shot을 검토하여, 추출된 캐릭터가 등장하는 장면인지 판단한다.
+- 캐릭터가 등장한다면, 대명사(그, 그녀, 아이 등)나 모호한 주어를 **'캐릭터 이름'**으로 교체하여 문장을 명확하게 수정한다.
+- 예: "그가 검을 뽑는다" -> "철수가 검을 뽑는다"
+- 캐릭터가 등장하지 않는 장면(배경, 사물 등)은 원문 그대로 둔다.
+- **절대 [ ] 같은 괄호나 태그를 추가하지 말고, 자연스러운 문장으로 작성하라.**
+
+대본(Shots):
+${shotsText}
+
+응답 형식 (JSON):
+{
+  "characters": [
+    { "name": "이름", "description": "visual description..." }
+  ],
+  "revised_shots": [
+    { "shot_index": 1, "content": "수정된 문장 또는 원문" },
+    { "shot_index": 2, "content": "..." }
+  ]
+}`;
+
+      const output = await generateLLM({
+        prompt: charPrompt,
+        model: settings?.script.model || 'google/gemini-2.0-flash-001',
+        temperature: 0.3,
+      });
+
+      const cleaned = output.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      if (parsed.characters && Array.isArray(parsed.characters) && parsed.characters.length > 0) {
+        const newProfiles: CharacterProfile[] = parsed.characters.map((c: any, idx: number) => ({
+          id: `char-auto-${Date.now()}-${idx}`,
+          name: c.name,
+          description: c.description,
+          status: 'active'
+        }));
+        
+        setCharacterProfiles(newProfiles);
+        
+        // 대본 업데이트 (이름이 명시된 버전으로 교체)
+        if (parsed.revised_shots && Array.isArray(parsed.revised_shots)) {
+             setShots(prev => prev.map((shot, idx) => {
+                 const revision = parsed.revised_shots.find((r: any) => r.shot_index === idx + 1);
+                 
+                 // 내용이 변경되었고, 길이가 너무 짧아지거나(오류 방지) 하지 않은 경우만 적용
+                 if (revision && revision.content && revision.content.length > 5) {
+                     return { 
+                        ...shot, 
+                        content: revision.content,
+                        visual: shot.visual // Explicitly preserve the existing visual description
+                     };
+                 }
+                 return shot;
+             }));
+        }
+        
+        console.log("✅ Auto-extracted characters & revised script:", newProfiles);
+      }
+    } catch (e) {
+      console.error("Character auto-extraction failed", e);
+    }
   };
 
   // Shot 편집 핸들러들
-  const updateShot = (id: string, newContent: string) => {
-    setShots(prev => prev.map(s => s.id === id ? { ...s, content: newContent } : s));
+  const updateShot = (id: string, field: 'content' | 'visual', value: string) => {
+    setShots(prev => prev.map(s => s.id === id ? { ...s, [field]: value } : s));
   };
 
   const duplicateShot = (id: string) => {
@@ -827,73 +948,237 @@ const App: React.FC = () => {
     setShots(prev => prev.filter(s => s.id !== id));
   };
 
+  const handleAddCharacter = () => {
+    setCharacterProfiles(prev => [
+      ...prev,
+      { id: `char-${Date.now()}`, name: `캐릭터 ${prev.length + 1}`, description: '', status: 'active' }
+    ]);
+  };
+
+  const handleRemoveCharacter = (id: string) => {
+    if (characterProfiles.length <= 1) return;
+    setCharacterProfiles(prev => prev.filter(c => c.id !== id));
+  };
+
+  const handleUpdateCharacter = (id: string, updates: Partial<CharacterProfile>) => {
+    setCharacterProfiles(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
+  };
+
+  const handleGenerateCharacterImage = async (id: string) => {
+    const char = characterProfiles.find(c => c.id === id);
+    if (!char || !char.description) {
+      alert("캐릭터 설명을 입력해주세요.");
+      return;
+    }
+
+    handleUpdateCharacter(id, { status: 'processing' });
+    try {
+      const styles = settings?.image.styles || [];
+      const styleObj = styles.find(s => s.id === selectedImageStyle);
+      const stylePrefix = styleObj?.prefix || '';
+      
+      // 캐릭터 일관성 키워드 보강
+      let refined = char.description.trim().replace(/\.$/, '');
+      const kws = ['oval face', 'consistent facial features', 'consistent appearance'];
+      if (!kws.some(k => refined.toLowerCase().includes(k))) {
+        refined += `, ${kws[0]}, ${kws[1]}`;
+      }
+
+      const imageUrl = await generateFalImage({
+        prompt: `${stylePrefix}, close-up portrait of ${refined}, neutral background`,
+        aspect_ratio: '1:1',
+      });
+
+      handleUpdateCharacter(id, { imageUrl, status: 'active' });
+    } catch (error) {
+      console.error("Character image gen failed", error);
+      alert("이미지 생성에 실패했습니다.");
+      handleUpdateCharacter(id, { status: 'active' });
+    }
+  };
+
   const handleConfirmShots = async () => {
-  // 상단에서 서버 연결 확인
-  setIsLoading(true); // 우선 로딩 표시
+    // 상단에서 서버 연결 확인
+    setIsLoading(true);
+    const isServerHealthy = await checkServerHealth();
+    if (!isServerHealthy) {
+      setIsLoading(false);
+      alert("서버 연결에 실패했습니다. 백엔드 서버가 실행 중인지 확인해주세요.\n\n터미널을 확인하고 'npm run dev'를 다시 실행해주세요.");
+      return;
+    }
 
-  const isServerHealthy = await checkServerHealth();
-  if (!isServerHealthy) {
-    setIsLoading(false);
-    alert("서버 연결에 실패했습니다. 백엔드 서버가 실행 중인지 확인해주세요.\n\n터미널을 확인하고 'npm run dev'를 다시 실행해주세요.");
-    return;
-  }
+    if (!shots || shots.length === 0) {
+      setIsLoading(false);
+      alert("구성된 장면(Shot)이 없습니다. 이전 단계에서 대본을 먼저 생성해주세요.");
+      return;
+    }
 
-  // Shot들을 Scene 구조로 변환하여 다음 단계(이미지 생성)로 진행
-  setLoadingMessage("각 컷에 맞는 AI 이미지를 생성하고 있습니다...");
-  setLoadingProgress(0);
+    setLoadingMessage("각 컷에 맞는 AI 이미지를 설계하고 있습니다...");
+    setLoadingProgress(0);
 
     try {
+      const styles = settings?.image.styles || [];
+      const styleObj = styles.find(s => s.id === selectedImageStyle);
+      const stylePrefix = styleObj?.prefix || '(no style)';
+      const aspectRatio = videoLength === 'shorts' ? '9:16' : '16:9';
+
+      // 모든 캐릭터 프로필 통합 및 정제
+      const characterBlock = useCharacterProfile ? characterProfiles.map(char => {
+        let desc = char.description.trim().replace(/\.$/, '');
+        const kws = ['oval face', 'consistent facial features', 'consistent appearance'];
+        if (!kws.some(k => desc.toLowerCase().includes(k))) {
+          desc += `, ${kws[0]}, ${kws[1]}`;
+        }
+        return `[Character: ${char.name}] ${desc}`;
+      }).join(' AND ') : '';
+
+      const shotListString = shots.map((s, idx) => 
+        `Shot ${idx + 1} [ID: ${s.id}]
+        - Voiceover: "${s.content}"
+        - Visual: "${s.visual || 'Make a scene that matches the voiceover.'}"`
+      ).join('\n\n');
+      
+      const promptGenerationSystem = settings?.image?.promptGenerationSystem || `너는 AI 이미지 생성 시스템의 프롬프트 구조화 엔진이다.
+이 작업의 최우선 목표는 "캐릭터 일관성"과 "그림체(스타일) 일관성"이다.
+
+중요 전제:
+1. 이미지 스타일은 UI에서 선택된 STYLE_PRESET 문자열로 전달된다.
+2. STYLE_PRESET은 시스템 상수이며, 너는 이를 수정, 해석, 보완, 재작성하지 않는다.
+3. 그림체, 렌더링, 조명, 색감, 화풍 관련 표현은 STYLE_PRESET 외부에서 절대 생성하지 않는다.
+
+캐릭터 이미지 참조 규칙 (매우 중요):
+1. 사용자가 CHARACTER_REFERENCE_IMAGE(캐릭터 참조 이미지)를 제공할 수 있다.
+2. 이 이미지는 캐릭터의 외형을 고정하기 위한 "참조 이미지"다.
+3. 참조 이미지에서는 다음 요소만 참고한다: 얼굴 비율, 헤어 스타일, 체형, 전체적인 인상.
+4. 참조 이미지의 배경, 조명, 포즈, 스타일은 절대 따라하지 않는다.
+5. 참조 이미지가 제공된 경우, 모든 컷에서 동일한 캐릭터로 인식될 수 있도록 외형을 최대한 일관되게 유지해야 한다.
+
+캐릭터 텍스트 규칙:
+1. CHARACTER_PROFILE은 캐릭터의 성별, 나이대, 얼굴형, 헤어, 의상을 정의한다.
+2. CHARACTER_PROFILE은 하나의 고정 문장 블록이며, 모든 씬에서 단어 하나도 변경되지 않아야 한다.
+3. 문장 끝에 마침표(.)를 사용하지 않고, 쉼표(,)로만 연결된 단일 문장으로 유지한다.
+4. 캐릭터 일관성을 강화하기 위해 CHARACTER_PROFILE에는 다음 키워드 중 최소 1~2개를 반드시 포함한다: oval face, consistent facial features, consistent appearance.
+
+장면 구성 규칙:
+1. 이 작업은 영상이 아니라 "이미지 세트" 생성이다.
+2. 장소(environment)는 컷마다 자유롭게 변경 가능하다.
+3. 캐릭터의 외형과 그림체는 모든 이미지에서 절대 변경되지 않아야 한다.
+
+너의 역할:
+1. SHOT 텍스트를 분석하여 다음 SCENE 슬롯만 생성한다: camera_shot, action_or_pose, environment, mood.
+2. main_subject는 생성하지 않는다. 모든 컷의 주체는 CHARACTER_PROFILE이다.
+
+최종 이미지 프롬프트 생성 규칙:
+final_image_prompt = [STYLE_PRESET] + [CHARACTER_REFERENCE_IMAGE (있을 경우 참조)] + [CHARACTER_PROFILE] + [camera_shot] + [action_or_pose] + [environment] + [mood]
+
+반드시 아래 JSON 형식으로만 응답하세요:
+{
+  "results": [
+    {
+      "id": "샷의 ID",
+      "shot_index": "번호",
+      "character_profile": "[CHARACTER_PROFILE 내용]",
+      "camera_shot": "영어 묘사",
+      "action_or_pose": "영어 묘사",
+      "environment": "영어 묘사",
+      "mood": "영어 묘사",
+      "final_image_prompt": "위 순서 규칙을 100% 준수하여 생성된 최종 영문 프롬프트"
+    }
+  ]
+}`;
+
+      // 사용자가 캐릭터를 생성했을 때의 이미지를 참조 이미지로 사용할 수 있도록 함
+      const referenceSummary = useCharacterProfile
+        ? characterProfiles
+          .filter(c => c.imageUrl)
+          .map(c => `CHARACTER_REFERENCE_IMAGE (for ${c.name}): ${c.imageUrl}`)
+          .join('\n')
+        : '';
+
+      const promptOutput = await generateLLM({
+        prompt: `Synopsis: ${synopsis}\nSTYLE_PRESET: ${stylePrefix}\nCHARACTER_PROFILE: ${characterBlock}\n${referenceSummary}\n\nSHOT 목록:\n${shotListString}\n\nIMPORTANT: output MUST be valid JSON as defined in system prompt.`,
+        system_prompt: promptGenerationSystem,
+        model: settings?.script.model || 'google/gemini-2.0-flash-001',
+        temperature: 0.3,
+      });
+
+      // Robust JSON Extraction
+      let jsonStr = promptOutput;
+      const firstCurly = promptOutput.indexOf('{');
+      const lastCurly = promptOutput.lastIndexOf('}');
+      if (firstCurly !== -1 && lastCurly !== -1 && lastCurly > firstCurly) {
+        jsonStr = promptOutput.substring(firstCurly, lastCurly + 1);
+      }
+
+      let promptResults: any[] = [];
+      try {
+        const parsed = JSON.parse(jsonStr);
+        promptResults = parsed.results || (Array.isArray(parsed) ? parsed : []);
+      } catch (e) {
+        console.error("JSON Parse Error", e);
+      }
+
       const newScenes: Scene[] = [];
       const total = shots.length;
 
-      // 선택된 스타일의 prefix 가져오기
-      const styleObj = IMAGE_STYLES.find(s => s.id === selectedImageStyle);
-      const stylePrefix = styleObj?.prefix || '';
-      const aspectRatio = videoLength === 'shorts' ? '9:16' : '16:9';
-
       for (let i = 0; i < total; i++) {
         const shot = shots[i];
+        const resObj = Array.isArray(promptResults) 
+          ? promptResults.find(r => String(r.id) === String(shot.id) || Number(r.shot_index) === i + 1)
+          : null;
+        
+        const finalPrompt = resObj?.final_image_prompt || `${stylePrefix}, ${characterBlock}, detailed cinematic scene`;
 
-        // 메시지 및 진척도 업데이트
-        setLoadingMessage(`컷 ${i + 1} / ${total} : 이미지 생성 중...`);
-        setLoadingProgress(Math.round((i / total) * 100));
+        setLoadingMessage(`이미지 생성 중... (${i + 1}/${total})`);
+        setLoadingProgress(Math.round(((i + 0.1) / total) * 100));
 
-        let imageUrl = '';
-        const characterContext = characterDescription ? `${characterDescription}, ` : '';
-
+        let imageUrl = "";
         try {
-          // xai/grok-imagine-image 이미지 생성
-          imageUrl = await generateFalImage({
-            prompt: `${characterContext}${shot.content}`,
+          // 캐릭터 참조 이미지 중 첫 번째 이미지를 메인 레퍼런스로 사용 (Grok Edit API는 단일 image_url 지원)
+          const validChars = useCharacterProfile ? characterProfiles.filter(c => c.imageUrl) : [];
+          const firstRefUrl = validChars.length > 0 ? validChars[0].imageUrl : undefined;
+
+          // 만약 2명 이상이면 프롬프트에 텍스트로도 보강
+          /* 
+             NOTE: Grok Edit 모드는 'image_url'을 원본으로 보고 'prompt'대로 수정하는 모드입니다.
+             따라서 원본 캐릭터의 느낌을 살리면서 상황을 묘사하는 방식으로 동작합니다.
+          */
+
+          imageUrl = await generateFalImage({ 
+            prompt: finalPrompt, 
             aspect_ratio: aspectRatio,
-            style: stylePrefix,
+            reference_image_url: firstRefUrl,
+            model: settings?.image.defaultModel
           });
-        } catch (e) {
-          console.error(`Shot ${i+1} image generation failed`, e);
-          imageUrl = `https://picsum.photos/seed/${shot.id}/800/450`;
+        } catch (err) {
+          console.error("Image Gen Error", err);
+          imageUrl = `https://picsum.photos/seed/${shot.id || i}/800/450`;
         }
 
         newScenes.push({
-          id: shot.id,
+          id: shot.id || `scene-${Date.now()}-${i}`,
           name: `Shot ${i + 1}`,
           duration: `${Math.ceil(shot.content.length * 0.25)}s`,
           imageUrl,
           script: shot.content,
-          prompt: `${stylePrefix}, ${characterContext}${shot.content}`,
+          prompt: finalPrompt,
           isManualPrompt: false,
-          status: "active" as const,
+          status: "active",
           motionStyle: "시네마틱",
         });
       }
 
-      setLoadingProgress(100);
-      setScenes(newScenes);
-      // 이미지 생성 단계(CUT_SELECTION)로 이동
-      setStep(CreationStep.CUT_SELECTION);
-      
+      if (newScenes.length > 0) {
+        setScenes(newScenes);
+        setSelectedSceneId(newScenes[0].id);
+        setStep(CreationStep.CUT_SELECTION);
+      } else {
+        throw new Error("No scenes were created");
+      }
+
     } catch (error) {
-      console.error("Failed to generate shot images:", error);
-      alert("이미지 준비 중 오류가 발생했습니다.");
+      console.error("Bulk Generation Failed", error);
+      alert("이미지 생성 중 오류가 발생했습니다. 다시 시도해주세요.");
     } finally {
       setIsLoading(false);
       setLoadingProgress(0);
@@ -925,7 +1210,7 @@ const App: React.FC = () => {
   const handleGenerateMotions = async () => {
     setIsLoading(true);
     setMotionError(null);
-    const providerName = videoProvider === 'kling' ? 'Kling Pro' : videoProvider === 'kling-standard' ? 'Kling Standard' : videoProvider === 'veo' ? 'Veo' : 'Sora';
+    const providerName = videoProvider === 'kling' ? 'Kling Pro' : videoProvider === 'kling-standard' ? 'Kling Standard' : videoProvider === 'grok' ? 'xAI Grok' : videoProvider === 'veo' ? 'Veo' : 'Sora';
     setLoadingMessage(`${providerName} AI가 정지된 이미지에 움직임을 불어넣고 있습니다...`);
     setLoadingProgress(0);
 
@@ -1006,16 +1291,18 @@ const App: React.FC = () => {
     const scene = scenes.find(s => s.id === sceneId);
     if (!scene) return;
 
+    setIsLoading(true);
     // 상태를 'processing'으로 변경
     setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, status: 'processing' } : s));
 
     try {
       console.log(`🖼️ Regenerating image for scene: ${scene.name}`);
-      const imageUrl = await generateImage({
+      const aspectRatio = videoLength === 'shorts' ? '9:16' : '16:9';
+      
+      const imageUrl = await generateFalImage({
         prompt: scene.prompt,
-        keywords: extractKeywords(scene.script, "scene", "context"), // 키워드 재추출 불필요하면 prompt만 사용해도 됨
-        width: videoLength === "shorts" ? 450 : 800, // 비율에 맞게
-        height: videoLength === "shorts" ? 800 : 450 
+        aspect_ratio: aspectRatio,
+        model: settings?.image.defaultModel
       });
 
       // 이미지 URL 및 상태 업데이트
@@ -1026,118 +1313,38 @@ const App: React.FC = () => {
       console.error("Image regeneration failed:", error);
       alert("이미지 생성에 실패했습니다. 프롬프트를 확인해주세요.");
       // 상태 복구
-      setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, status: 'error' } : s));
+      setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, status: 'active' } : s));
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const regenerateSceneImage = async (sceneId: string) => {
-    const sceneIndex = scenes.findIndex((s) => s.id === sceneId);
-    if (sceneIndex === -1) return;
+    const scene = scenes.find(s => s.id === sceneId);
+    if (!scene) return;
 
-    const newScenes = [...scenes];
-    const currentScene = newScenes[sceneIndex];
-    
-    // 즉시 처리 중 상태로 변경하여 사용자에게 피드백
-    newScenes[sceneIndex].status = "processing";
-    setScenes(newScenes);
+    setIsLoading(true);
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, status: 'processing' } : s));
 
     try {
-      // const genAI = getAI(); // This line will be removed
-      // // 사용자 API 키로 테스트한 결과: nano-banana-pro-preview 모델 사용 확인
-      // const model = genAI.getGenerativeModel({ model: "nano-banana-pro-preview" }); // This line will be removed
+      console.log(`🎬 Regenerating image for scene: ${scene.name}`);
+      const aspectRatio = videoLength === 'shorts' ? '9:16' : '16:9';
       
-      // Step 1: Gemini API로 장면 분석 및 최적화된 이미지 검색 키워드 생성
-      console.log(`🎬 Analyzing scene: ${currentScene.name}`);
-      
-      const prompt = `Analyze this video scene and generate optimized image search keywords:
-
-**Scene Title:** ${currentScene.name}
-**Script/Narration:** ${currentScene.script}
-**Current Image Prompt:** ${currentScene.prompt}
-
-Please provide:
-1. An enhanced, cinematic English image generation prompt (detailed, professional, 8k quality)
-2. 5-7 specific English search keywords that will help find the perfect image
-3. The mood/atmosphere of the scene (e.g., dark, bright, mysterious, energetic)
-
-Respond in JSON format:
-{
-  "prompt": "enhanced detailed prompt here",
-  "keywords": "keyword1,keyword2,keyword3,keyword4,keyword5",
-  "mood": "atmospheric description"
-}`;
-      
-      // const result = await model.generateContent(prompt); // This line will be removed
-      // const response = await result.response; // This line will be removed
-      // let text = response.text(); // This line will be removed
-      
-      // // JSON 파싱을 위한 전처리
-      // text = text.replace(/```json/g, '').replace(/```/g, '').trim(); // This line will be removed
-
-      // const analysis = JSON.parse(text || '{}'); // This line will be removed
-      // const enhancedPrompt = analysis.prompt || currentScene.prompt; // This line will be removed
-      // const keywords = analysis.keywords || extractKeywords( // This line will be removed
-      //   currentScene.name, // This line will be removed
-      //   currentScene.script, // This line will be removed
-      //   currentScene.prompt // This line will be removed
-      // ); // This line will be removed
-      // const mood = analysis.mood || 'cinematic'; // This line will be removed
-
-      // console.log(`✨ Generated keywords: ${keywords}`); // This line will be removed
-      // console.log(`🎨 Mood: ${mood}`); // This line will be removed
-      // console.log(`📝 Enhanced prompt: ${enhancedPrompt}`); // This line will be removed
-
-      // // Step 2: 프롬프트 업데이트
-      // newScenes[sceneIndex].prompt = enhancedPrompt; // This line will be removed
-
-      // Step 3: 여러 이미지 소스를 시도하여 최적의 이미지 가져오기
-      const imageUrl = await generateImage({
-        prompt: currentScene.prompt, // Use current prompt as fallback
-        keywords: extractKeywords(currentScene.name, currentScene.script, currentScene.prompt), // Fallback keyword extraction
-        width: 800,
-        height: 450
+      const imageUrl = await generateFalImage({
+        prompt: scene.prompt,
+        aspect_ratio: aspectRatio,
+        model: settings?.image.defaultModel
       });
 
-      console.log(`🖼️ Image generated: ${imageUrl}`);
-      
-      // Step 4: 이미지 URL 업데이트
-      newScenes[sceneIndex].imageUrl = imageUrl;
-      newScenes[sceneIndex].status = "active";
-      
-      // 성공적으로 완료
-      setScenes([...newScenes]);
-      
-      // 사용자에게 성공 피드백 (선택사항)
-      console.log(`✅ Image successfully regenerated for scene: ${currentScene.name}`);
-      
+      setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, imageUrl, status: 'completed' } : s));
+      console.log(`✅ Image regenerated for scene: ${scene.name}`);
+
     } catch (error) {
       console.error("❌ Image regeneration failed:", error);
-      
-      // 에러 발생 시에도 대체 이미지 제공
-      try {
-        // 간단한 키워드로 대체 이미지 시도
-        const fallbackKeywords = currentScene.name
-          .split(' ')
-          .slice(0, 3)
-          .join(',');
-        
-        const fallbackImage = await generateImage({
-          prompt: currentScene.name,
-          keywords: `${fallbackKeywords},video,cinematic`,
-          width: 800,
-          height: 450
-        });
-        
-        newScenes[sceneIndex].imageUrl = fallbackImage;
-        console.log(`⚠️ Used fallback image: ${fallbackImage}`);
-      } catch (fallbackError) {
-        // 최종 폴백: 랜덤 이미지
-        newScenes[sceneIndex].imageUrl = `https://picsum.photos/seed/${Date.now()}/800/450`;
-        console.error("⚠️ All image sources failed, using random image");
-      }
-      
-      newScenes[sceneIndex].status = "active";
-      setScenes([...newScenes]);
+      alert("이미지 재생성에 실패했습니다.");
+      setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, status: 'active' } : s));
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -1375,32 +1582,95 @@ Respond in JSON format:
     setLoadingMessage("최종 영상을 병합하고 자막을 합성하고 있습니다...");
 
     try {
-      const steps = [
-        { progress: 10, message: "비디오 클립 분석 중..." },
-        { progress: 25, message: "오디오 트랙 정합 및 노이즈 제거..." },
-        { progress: 45, message: "사용자 정의 자막 레이어 합성 중..." },
-        { progress: 65, message: "프레임 보간 및 화질 최적화 (AI Upscaling)..." },
-        { progress: 85, message: "최종 인코딩 및 파일 생성 중..." },
-        { progress: 100, message: "렌더링 완료!" }
-      ];
+      setLoadingMessage("서버에서 최종 영상을 렌더링하고 있습니다... (시간이 걸릴 수 있습니다)");
+      
+      // 1. SRT 자막 생성
+      let srtContent = '';
+      let srtIndex = 1;
+      let currentTime = 0;
 
-      for (const step of steps) {
-        await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 1000));
-        setRenderProgress(step.progress);
-        setLoadingMessage(step.message);
+      const formatSrtTime = (seconds: number) => {
+          const date = new Date(0);
+          date.setMilliseconds(seconds * 1000);
+          return date.toISOString().substr(11, 12).replace('.', ',');
+      };
+
+      const renderScenes = scenes.map(scene => {
+          let duration = 5;
+          if (scene.duration) {
+             if (scene.duration.includes(':')) {
+                 const p = scene.duration.split(':').map(Number);
+                 duration = (p[0] || 0) * 60 + (p[1] || 0);
+             } else {
+                 duration = parseFloat(scene.duration.replace('s', '')) || 5;
+             }
+          }
+
+          // SRT Generate per scene
+          if (scene.subtitleSegments && scene.subtitleSegments.length > 0) {
+              scene.subtitleSegments.forEach((seg: any) => {
+                  const start = currentTime + (seg.startTime || 0);
+                  const end = currentTime + (seg.endTime || duration);
+                  srtContent += `${srtIndex++}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${seg.text}\n\n`;
+              });
+          } else if (scene.script) {
+              srtContent += `${srtIndex++}\n${formatSrtTime(currentTime)} --> ${formatSrtTime(currentTime + duration)}\n${scene.script}\n\n`;
+          }
+
+          currentTime += duration;
+
+          return {
+              id: scene.id,
+              videoUrl: scene.videoClipUrl,
+              audioUrl: scene.audioUrl,
+              durationSec: duration
+          };
+      });
+
+      // 2. 서버로 렌더링 요청
+      const API_BASE_URL = import.meta.env.VITE_API_URL ?? '';
+      
+      // Determine resolution based on videoLength state
+      // shorts: 1080x1920, otherwise 1920x1080 or custom?
+      // Assuming 'shorts' = 9:16 (1080x1920), else 16:9 (1920x1080)
+      const isShorts = videoLength === 'shorts';
+      const width = isShorts ? 1080 : 1920;
+      const height = isShorts ? 1920 : 1080;
+
+      const renderRes = await fetch(`${API_BASE_URL}/api/video/render`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+              scenes: renderScenes,
+              srtContent,
+              width,
+              height
+          })
+      });
+
+      if (!renderRes.ok) {
+          const errData = await renderRes.json();
+          throw new Error(errData.error || '렌더링 요청 실패');
       }
 
-      setRenderError('✅ 전체 영상 렌더링이 완료되었습니다! 아래 다운로드 버튼을 눌러 확인하세요.');
+      const renderResult = await renderRes.json();
       
-      // 실제 다운로드 트리거 (첫 번째 장면 예시)
-      const firstValidVideo = scenes.find(s => s.videoClipUrl)?.videoClipUrl;
-      if (firstValidVideo) {
-        const link = document.createElement('a');
-        link.href = firstValidVideo;
-        link.download = `VidAI_Project_${new Date().getTime()}.mp4`;
-        document.body.appendChild(link);
-        // link.click(); // 자동 다운로드는 사용자가 버튼을 눌렀을 때만 하도록 수정 (선택사항)
-        document.body.removeChild(link);
+      setRenderProgress(100);
+      setRenderError('✅ 전체 영상 렌더링 완료! 자동 다운로드됩니다.');
+
+      // 3. 다운로드 트리거
+      if (renderResult.videoUrl) {
+          // If URL is relative, prepend API URL if needed, or if it's served statically
+          // renderController returns /uploads/..., if frontend and backend are same origin or proxied it works.
+          // If distinct, prepend VITE_API_URL
+          const downloadUrl = renderResult.videoUrl.startsWith('http') ? renderResult.videoUrl : `${API_BASE_URL}${renderResult.videoUrl}`;
+          
+          const a = document.createElement('a');
+          a.href = downloadUrl;
+          a.download = `VidAI_Final_${Date.now()}.mp4`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
       }
 
     } catch (error) {
@@ -1709,6 +1979,10 @@ Respond in JSON format:
           <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white/50 hover:text-white hover:bg-white/5 text-xs font-medium transition-all">
             <span className="material-symbols-outlined text-[16px]">history</span>
             <span className="hidden sm:inline">프로젝트 내역</span>
+          </button>
+          <button onClick={() => setIsAdminModalOpen(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-primary hover:bg-primary/10 text-xs font-bold transition-all">
+            <span className="material-symbols-outlined text-[16px]">admin_panel_settings</span>
+            <span className="hidden sm:inline">관리자</span>
           </button>
           <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white/50 hover:text-white hover:bg-white/5 text-xs font-medium transition-all">
             <span className="material-symbols-outlined text-[16px]">layers</span>
@@ -2027,6 +2301,31 @@ Respond in JSON format:
                        AI가 텍스트를 분석하여 최적의 영상 구조를 제안합니다.
                      </p>
                   )}
+
+                  {shots.length > 0 && !scriptPreview && !isLoading && (
+                     <div className="mt-6 pt-6 border-t border-[#292348] animate-in fade-in slide-in-from-top-2">
+                        <div className="bg-[#1a162e] border border-primary/30 rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4">
+                           <div className="flex items-center gap-3">
+                              <div className="size-10 rounded-lg bg-primary/20 flex items-center justify-center shrink-0">
+                                 <span className="material-symbols-outlined text-primary">history_edu</span>
+                              </div>
+                              <div className="text-center md:text-left">
+                                 <p className="text-white text-sm font-bold">작성 중인 구성안이 있습니다.</p>
+                                 <p className="text-[#9b92c9] text-xs mt-0.5">
+                                    총 {shots.length}개 장면 / {shots.reduce((acc,s) => acc + (s.content || "").length, 0)}자
+                                 </p>
+                              </div>
+                           </div>
+                           <button
+                              onClick={() => setStep(CreationStep.SCRIPT)}
+                              className="w-full md:w-auto px-5 py-2.5 bg-white text-black hover:bg-white/90 rounded-lg font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-lg shadow-white/5"
+                           >
+                              <span>구성(장면 설계) 계속하기</span>
+                              <span className="material-symbols-outlined text-base">arrow_forward</span>
+                           </button>
+                        </div>
+                     </div>
+                  )}
                 </div>
 
                 {/* 생성된 대본 미리보기 영역 */}
@@ -2046,14 +2345,13 @@ Respond in JSON format:
                     </div>
 
                     <div className="bg-[#0d0a1a] border border-[#292348] rounded-xl p-6 custom-scrollbar max-h-[400px] overflow-y-auto">
-                      <p className="text-white/90 text-sm leading-8 font-medium whitespace-pre-line text-center">
-                        {scriptPreview.shots.flatMap(shot => shot.content.split(/(?<=,)/g)).map((sentence, i) => (
-                           <React.Fragment key={i}>
-                              {sentence.trim()}
-                              {i < scriptPreview.shots.length - 1 && <br/>}
-                           </React.Fragment>
+                      <div className="space-y-4 text-center">
+                        {scriptPreview.shots.map((shot, idx) => (
+                           <p key={idx} className="text-white/90 text-sm leading-8 font-medium whitespace-pre-line">
+                              {shot.content}
+                           </p>
                         ))}
-                      </p>
+                      </div>
                     </div>
 
                     <div className="flex gap-3 justify-center">
@@ -2088,9 +2386,9 @@ Respond in JSON format:
         const estimatedCredit = 50 + (shots.length * 2);
 
         return (
-          <div className="max-w-[1400px] mx-auto w-full px-4 py-4 pb-20 overflow-hidden">
-            {/* Compact Header */}
-            <div className="flex items-center justify-between mb-4 bg-[#1a162e] p-4 rounded-xl border border-[#292348] shadow-lg">
+          <main className="flex-1 flex flex-col h-[calc(100vh-64px)] overflow-hidden bg-[#0a0618]">
+            {/* Header */}
+            <div className="h-16 border-b border-[#292348] flex items-center justify-between px-6 bg-[#131022] shrink-0">
               <div className="flex items-center gap-6">
                 <div className="flex items-center gap-3">
                   <div className="size-10 rounded-lg bg-primary/20 flex items-center justify-center">
@@ -2122,9 +2420,10 @@ Respond in JSON format:
               </button>
             </div>
 
-            <div className="flex gap-6 items-start h-[calc(100vh-160px)]">
-              {/* Main Content: Shot List */}
-              <div className="flex-1 overflow-y-auto pr-4 custom-scrollbar">
+            <div className="flex-1 overflow-hidden p-6">
+              <div className="max-w-[1600px] mx-auto h-full flex gap-6">
+                {/* Main Content: Shot List */}
+                <div className="flex-1 overflow-y-auto pr-4 custom-scrollbar h-full">
                  {/* Synopsis Panel */}
                  <div className="bg-[#1a162e] border border-[#292348] rounded-xl p-4 mb-4 shadow-sm">
                    <div className="flex items-center gap-2 mb-3">
@@ -2150,14 +2449,36 @@ Respond in JSON format:
                              <span className="text-[#9b92c9] text-[9px] font-bold uppercase tracking-tighter">Shot</span>
                              <span className="text-white text-xl font-black font-display leading-none">{idx + 1}</span>
                            </div>
-                           <div className="flex-1">
-                             <textarea
-                               value={shot.content}
-                               onChange={(e) => updateShot(shot.id, e.target.value)}
-                               className="w-full bg-[#0d0a1a] border border-[#292348] rounded-lg p-3 text-white text-sm leading-relaxed focus:border-primary transition-all resize-none"
-                               rows={2}
-                               placeholder="대본 내용을 입력하거나 수정하세요..."
-                             />
+                           <div className="flex-1 space-y-3">
+                             {/* Audio Script (음성) */}
+                             <div className="space-y-1">
+                               <div className="flex items-center gap-1.5 ml-1">
+                                 <span className="material-symbols-outlined text-[10px] text-blue-400">mic</span>
+                                 <label className="text-[10px] text-blue-400 font-bold uppercase tracking-wider">Audio (내레이션)</label>
+                               </div>
+                               <textarea
+                                 value={shot.content}
+                                 onChange={(e) => updateShot(shot.id, 'content', e.target.value)}
+                                 className="w-full bg-[#0d0a1a] border border-blue-900/30 rounded-lg p-3 text-white text-sm leading-relaxed focus:border-blue-500 transition-all resize-none placeholder:text-white/20"
+                                 rows={2}
+                                 placeholder="성우가 읽을 대사를 입력하세요..."
+                               />
+                             </div>
+
+                             {/* Visual Prompt (화면) */}
+                             <div className="space-y-1 relative">
+                               <div className="flex items-center gap-1.5 ml-1">
+                                 <span className="material-symbols-outlined text-[10px] text-orange-400">image</span>
+                                 <label className="text-[10px] text-orange-400 font-bold uppercase tracking-wider">Visual (장면 설계)</label>
+                               </div>
+                               <textarea
+                                 value={shot.visual || ''}
+                                 onChange={(e) => updateShot(shot.id, 'visual', e.target.value)}
+                                 className="w-full bg-[#0d0a1a] border border-orange-900/30 rounded-lg p-3 text-gray-300 text-xs leading-relaxed focus:border-orange-500 transition-all resize-none placeholder:text-white/20"
+                                 rows={2}
+                                 placeholder="화면에 보일 장면을 묘사하세요 (AI 이미지 생성용)..."
+                               />
+                             </div>
                            </div>
                            <div className="flex flex-col gap-2">
                              <button onClick={() => duplicateShot(shot.id)} className="w-8 h-8 rounded-lg bg-[#292348] hover:text-primary flex items-center justify-center transition-all" title="복제"><span className="material-symbols-outlined text-base">content_copy</span></button>
@@ -2186,7 +2507,7 @@ Respond in JSON format:
                        이미지 스타일
                     </h4>
                     <div className="grid grid-cols-3 gap-2 pb-2">
-                      {IMAGE_STYLES.map(style => (
+                      {(settings?.image.styles || []).map(style => (
                         <button
                           key={style.id}
                           onClick={() => setSelectedImageStyle(style.id)}
@@ -2241,33 +2562,94 @@ Respond in JSON format:
                           </div>
                        </div>
 
-                       <div>
-                          <label className="text-[#9b92c9] text-[10px] font-bold uppercase mb-2 block tracking-wider flex items-center justify-between">
-                            <span>캐릭터/컨셉 고정</span>
-                            <span className="material-symbols-outlined text-[14px] text-primary">auto_awesome</span>
-                          </label>
-                          <textarea
-                             value={characterDescription}
-                             onChange={(e) => setCharacterDescription(e.target.value)}
-                             placeholder="예: 20대 한국인 여성, 긴 생머리, 흰색 티셔츠..."
-                             className="w-full bg-[#0d0a1a] border border-[#292348] rounded-xl p-3 text-white text-[11px] leading-relaxed focus:border-primary resize-none placeholder:text-white/20 shadow-inner"
-                             rows={3}
-                          />
-                       </div>
+                        <div className="space-y-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-[#9b92c9] text-[10px] font-bold uppercase tracking-wider flex items-center gap-2 cursor-pointer" onClick={() => setUseCharacterProfile(!useCharacterProfile)}>
+                              <span>캐릭터 프로필 적용</span>
+                              <div className={`relative inline-flex h-4 w-8 items-center rounded-full transition-colors ${useCharacterProfile ? 'bg-primary' : 'bg-[#292348]'}`}>
+                                <span className={`${useCharacterProfile ? 'translate-x-[18px]' : 'translate-x-[2px]'} inline-block h-3 w-3 transform rounded-full bg-white transition-transform duration-200`} />
+                              </div>
+                            </label>
+                            <button 
+                              onClick={handleAddCharacter}
+                              disabled={!useCharacterProfile}
+                              className={`text-primary hover:text-white transition-colors flex items-center gap-1 ${!useCharacterProfile ? 'opacity-30 cursor-not-allowed' : ''}`}
+                            >
+                              <span className="material-symbols-outlined text-[16px]">add_circle</span>
+                              <span className="text-[9px]">추가</span>
+                            </button>
+                          </div>
+                          
+                          <div className={`space-y-3 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar transition-opacity duration-300 ${!useCharacterProfile ? 'opacity-30 pointer-events-none grayscale' : ''}`}>
+                            {characterProfiles.map((char) => (
+                              <div key={char.id} className="bg-[#0d0a1a] border border-[#292348] rounded-xl p-3 space-y-2 relative group">
+                                <div className="flex items-center justify-between gap-2">
+                                  <input 
+                                    className="bg-transparent border-none text-white text-[11px] font-bold focus:ring-0 p-0 w-full"
+                                    value={char.name}
+                                    onChange={(e) => handleUpdateCharacter(char.id, { name: e.target.value })}
+                                    placeholder="캐릭터 이름"
+                                  />
+                                  {characterProfiles.length > 1 && (
+                                    <button 
+                                      onClick={() => handleRemoveCharacter(char.id)}
+                                      className="text-white/20 hover:text-red-400 transition-colors"
+                                    >
+                                      <span className="material-symbols-outlined text-[16px]">delete</span>
+                                    </button>
+                                  )}
+                                </div>
+                                
+                                <div className="flex gap-3">
+                                  <div className="flex-1">
+                                    <textarea
+                                      value={char.description}
+                                      onChange={(e) => handleUpdateCharacter(char.id, { description: e.target.value })}
+                                      placeholder="외형 묘사 (나이, 머리카락, 옷 등)"
+                                      className="w-full bg-black/30 border border-[#292348] rounded-lg p-2 text-white text-[10px] leading-relaxed focus:border-primary resize-none placeholder:text-white/10"
+                                      rows={3}
+                                    />
+                                  </div>
+                                  <div className="w-16 h-16 rounded-lg border border-[#292348] bg-black/50 overflow-hidden relative flex-shrink-0">
+                                    {char.imageUrl ? (
+                                      <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
+                                    ) : (
+                                      <div className="w-full h-full flex items-center justify-center">
+                                        <span className="material-symbols-outlined text-white/10 text-xl">person</span>
+                                      </div>
+                                    )}
+                                    <button
+                                      onClick={() => handleGenerateCharacterImage(char.id)}
+                                      disabled={char.status === 'processing'}
+                                      className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                                    >
+                                      {char.status === 'processing' ? (
+                                        <div className="size-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                                      ) : (
+                                        <span className="material-symbols-outlined text-white text-base">refresh</span>
+                                      )}
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
 
-                       <div className="bg-primary/5 border border-primary/20 rounded-xl p-3 italic">
-                         <p className="text-[10px] text-primary/80 leading-relaxed text-center">
-                           * 선택하신 이미지 스타일과 컨셉이 모든 장면에 일관되게 적용됩니다.
-                         </p>
-                       </div>
-                    </div>
-                 </div>
-              </div>
+                        <div className="bg-primary/5 border border-primary/20 rounded-xl p-3 italic">
+                          <p className="text-[10px] text-primary/80 leading-relaxed text-center">
+                            * 캐릭터 프로필의 외형 정보와 선택된 스타일이 모든 장면에 고정 적용됩니다.
+                          </p>
+                        </div>
+                     </div>
+                  </div>
+               </div>
             </div>
           </div>
-        );
+        </main>
+      );
 
-      case CreationStep.CUT_SELECTION: {
+      case CreationStep.CUT_SELECTION:
         // 현재 선택된 Scene 찾기 (없으면 첫 번째)
         const currentScene = scenes.find((s) => s.id === selectedSceneId) || scenes[0];
         // 영상 비율 스타일 설정
@@ -2303,6 +2685,13 @@ Respond in JSON format:
                  </div>
               </div>
               <div className="flex items-center gap-4">
+                 <button
+                    onClick={() => setStep(CreationStep.SCRIPT)}
+                    className="px-4 py-2 bg-[#292348] hover:bg-[#3b3267] text-white rounded-lg font-bold text-xs flex items-center gap-2 transition-all border border-[#3b3267]"
+                  >
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>
+                    <span>구성 단계로</span>
+                  </button>
                  <div className="flex items-center gap-2 px-4 py-2 bg-[#0d0a1a] rounded-lg border border-[#292348]">
                    <span className="text-[#9b92c9] text-xs">Total Shots:</span>
                    <span className="text-white font-bold">{scenes.length}</span>
@@ -2449,33 +2838,11 @@ Respond in JSON format:
                         </p>
                     </div>
 
-                    {/* Style Controls */}
-                    <div className="border-t border-[#292348] pt-6 space-y-4">
-                       <label className="text-[#9b92c9] text-xs font-bold uppercase block">Effect Style</label>
-                       <div className="grid grid-cols-3 gap-2">
-                          {['Cinematic', 'Anime', '3D Render'].map(style => (
-                             <button 
-                               key={style}
-                               className={`px-2 py-2 rounded-lg text-[10px] font-bold border transition-all ${currentScene.prompt.includes(style) ? 'bg-primary/20 border-primary text-primary' : 'bg-[#0d0a1a] border-[#292348] text-[#9b92c9] hover:border-white/30'}`}
-                               onClick={() => {
-                                  // Add style keyword to prompt
-                                  if (!currentScene.prompt.includes(style)) {
-                                     const newPrompt = `${currentScene.prompt}, ${style}`;
-                                     setScenes(prev => prev.map(s => s.id === currentScene.id ? { ...s, prompt: newPrompt } : s));
-                                  }
-                               }}
-                             >
-                               {style}
-                             </button>
-                          ))}
-                       </div>
-                    </div>
                  </div>
               </div>
             </div>
           </div>
         );
-      }
 
       case CreationStep.SCENE_REVIEW:
         return (
@@ -2939,13 +3306,13 @@ Respond in JSON format:
                     <div>
                       <label className="text-xs text-[#9b92c9] font-bold mb-3 block">AI 목소리 선택</label>
                       <div className="grid grid-cols-2 gap-2">
-                        {VOICES.map((voice) => {
+                        {(settings?.audio.voices || []).map((voice) => {
                           const isSelected = selectedVoice?.id === voice.id;
                           const isPlaying = playingPreviewVoice === voice.id;
                           return (
                             <div
                               key={voice.id}
-                              onClick={() => setSelectedVoice(voice)}
+                              onClick={() => setSelectedVoice(voice as any)}
                               className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all ${
                                 isSelected ? 'border-primary bg-primary/10' : 'border-[#292348] hover:border-white/20 bg-[#0d0a1a]'
                               }`}
@@ -2960,13 +3327,28 @@ Respond in JSON format:
                                 if (isPlaying) return;
                                 setPlayingPreviewVoice(voice.id);
                                 try {
-                                  // 프리뷰 URL이 있으면 바로 사용 (비용 절감 및 속도 향상)
-                                  const audioUrl = voice.previewUrl || await previewVoiceTTS(voice.id);
+                                  // 프리뷰 URL 검증
+                                  const audioUrl = (voice.previewUrl && voice.previewUrl.startsWith('http')) 
+                                    ? voice.previewUrl 
+                                    : await previewVoiceTTS(voice.id);
+                                    
+                                  if (!audioUrl) throw new Error("Audio URL not found");
+
                                   const a = new Audio(audioUrl);
-                                  a.play();
+                                  a.play().catch(err => {
+                                     console.error("Audio Play Error:", err);
+                                     alert("오디오 재생 실패: " + err.message);
+                                     setPlayingPreviewVoice(null);
+                                  });
                                   a.onended = () => setPlayingPreviewVoice(null);
-                                  a.onerror = () => setPlayingPreviewVoice(null);
-                                } catch {
+                                  a.onerror = (e) => {
+                                     console.error("Audio Load Error:", e);
+                                     alert("오디오 로드 실패: 미리듣기 파일이 없거나 손상되었습니다.");
+                                     setPlayingPreviewVoice(null);
+                                  };
+                                } catch (err: any) {
+                                  console.error("Preview Logic Error:", err);
+                                  alert("미리듣기 오류: " + err.message);
                                   setPlayingPreviewVoice(null);
                                 }
                               }} className="p-1 rounded-full hover:bg-primary/20 transition-colors">
@@ -4279,17 +4661,26 @@ Respond in JSON format:
                     <button 
                       onClick={() => {
                         if (renderProgress === 100) {
-                             const firstValidVideo = scenes.find(s => s.videoClipUrl)?.videoClipUrl;
-                             if (firstValidVideo) {
-                               const link = document.createElement('a');
-                               link.href = firstValidVideo;
-                               link.download = `VidAI_Project_${new Date().getTime()}.mp4`;
-                               document.body.appendChild(link);
-                               link.click();
-                               document.body.removeChild(link);
-                             } else {
-                                alert("다운로드할 영상이 없습니다.");
-                             }
+                            const finalVideoUrl = scenes.find(s => s.videoClipUrl)?.videoClipUrl;
+                            if (finalVideoUrl) {
+                               const triggerDownload = async () => {
+                                  try {
+                                     const response = await fetch(finalVideoUrl);
+                                     const blob = await response.blob();
+                                     const url = window.URL.createObjectURL(blob);
+                                     const a = document.createElement('a');
+                                     a.href = url;
+                                     a.download = `VidAI_Final_${Date.now()}.mp4`;
+                                     document.body.appendChild(a);
+                                     a.click();
+                                     window.URL.revokeObjectURL(url);
+                                     document.body.removeChild(a);
+                                  } catch (e) {
+                                     window.open(finalVideoUrl, '_blank');
+                                  }
+                               };
+                               triggerDownload();
+                            }
                         } else {
                              handleFinalRender();
                         }
@@ -4429,83 +4820,36 @@ Respond in JSON format:
             <p className="text-[#9b92c9] text-sm mb-6">이미지를 영상으로 변환할 AI 모델을 선택하세요.</p>
 
             <div className="space-y-3 mb-8">
-              {/* Kling Pro */}
-              <button
-                onClick={() => setVideoProvider('kling')}
-                className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
-                  videoProvider === 'kling'
-                    ? 'border-primary bg-primary/10'
-                    : 'border-[#292348] hover:border-white/30'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-white font-bold flex items-center gap-2">
-                      Kling v1.6 Pro
-                      <span className="text-[10px] px-2 py-0.5 bg-green-500/20 text-green-400 rounded-full">사용 가능</span>
+              {(settings?.video.providers || []).map(provider => (
+                <button
+                  key={provider.id}
+                  disabled={!provider.enabled}
+                  onClick={() => setVideoProvider(provider.id)}
+                  className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
+                    !provider.enabled ? 'border-[#292348] opacity-50 cursor-not-allowed' :
+                    videoProvider === provider.id
+                      ? 'border-primary bg-primary/10'
+                      : 'border-[#292348] hover:border-white/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-white font-bold flex items-center gap-2">
+                        {provider.label}
+                        {provider.enabled ? (
+                          <span className="text-[10px] px-2 py-0.5 bg-green-500/20 text-green-400 rounded-full">사용 가능</span>
+                        ) : (
+                          <span className="text-[10px] px-2 py-0.5 bg-yellow-500/20 text-yellow-400 rounded-full">Coming Soon</span>
+                        )}
+                      </div>
+                      <p className="text-[#9b92c9] text-xs mt-1">{provider.description}</p>
                     </div>
-                    <p className="text-[#9b92c9] text-xs mt-1">fal.ai 제공 | 고품질 영상 생성 | ~$0.10/영상</p>
+                    {videoProvider === provider.id && (
+                      <span className="material-symbols-outlined text-primary">check_circle</span>
+                    )}
                   </div>
-                  {videoProvider === 'kling' && (
-                    <span className="material-symbols-outlined text-primary">check_circle</span>
-                  )}
-                </div>
-              </button>
-
-              {/* Kling Standard */}
-              <button
-                onClick={() => setVideoProvider('kling-standard')}
-                className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
-                  videoProvider === 'kling-standard'
-                    ? 'border-primary bg-primary/10'
-                    : 'border-[#292348] hover:border-white/30'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-white font-bold flex items-center gap-2">
-                      Kling v1.6 Standard
-                      <span className="text-[10px] px-2 py-0.5 bg-green-500/20 text-green-400 rounded-full">사용 가능</span>
-                    </div>
-                    <p className="text-[#9b92c9] text-xs mt-1">fal.ai 제공 | 빠른 생성 | ~$0.05/영상</p>
-                  </div>
-                  {videoProvider === 'kling-standard' && (
-                    <span className="material-symbols-outlined text-primary">check_circle</span>
-                  )}
-                </div>
-              </button>
-
-              {/* Veo (Coming Soon) */}
-              <button
-                disabled
-                className="w-full p-4 rounded-xl border-2 border-[#292348] text-left opacity-50 cursor-not-allowed"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-white font-bold flex items-center gap-2">
-                      Google Veo
-                      <span className="text-[10px] px-2 py-0.5 bg-yellow-500/20 text-yellow-400 rounded-full">Coming Soon</span>
-                    </div>
-                    <p className="text-[#9b92c9] text-xs mt-1">Google 제공 | Vertex AI 연동 필요</p>
-                  </div>
-                </div>
-              </button>
-
-              {/* Sora (Coming Soon) */}
-              <button
-                disabled
-                className="w-full p-4 rounded-xl border-2 border-[#292348] text-left opacity-50 cursor-not-allowed"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-white font-bold flex items-center gap-2">
-                      OpenAI Sora
-                      <span className="text-[10px] px-2 py-0.5 bg-yellow-500/20 text-yellow-400 rounded-full">Coming Soon</span>
-                    </div>
-                    <p className="text-[#9b92c9] text-xs mt-1">OpenAI 제공 | API 대기 중</p>
-                  </div>
-                </div>
-              </button>
+                </button>
+              ))}
             </div>
 
             <div className="flex gap-3">
@@ -4528,6 +4872,15 @@ Respond in JSON format:
             </div>
           </div>
         </div>
+      )}
+
+      {settings && (
+        <AdminModal 
+          isOpen={isAdminModalOpen} 
+          onClose={() => setIsAdminModalOpen(false)} 
+          settings={settings}
+          onSettingsUpdate={(newSettings) => setSettings(newSettings)}
+        />
       )}
 
       <style>{`

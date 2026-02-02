@@ -9,6 +9,8 @@ export interface ImageRequest {
   prompt: string;
   aspect_ratio?: string;
   style?: string;
+  reference_image_url?: string;
+  model?: string;
 }
 
 export interface ImageResponse {

@@ -14,6 +14,7 @@ export interface ScriptBlock {
   id: number;
   title: string;
   content: string;
+  visual?: string;
 }
 
 export interface SubtitleSegment {
@@ -47,4 +48,12 @@ export interface Voice {
   avatarUrl: string;
   gender?: 'male' | 'female';
   previewUrl?: string;  // 목소리 미리듣기용 샘플 오디오 URL
+}
+export interface CharacterProfile {
+  id: string;
+  name: string;
+  description: string;
+  imageUrl?: string;
+  referenceImageUrl?: string;
+  status?: 'active' | 'processing';
 }

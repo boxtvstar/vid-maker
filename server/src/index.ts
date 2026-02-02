@@ -6,6 +6,8 @@ import videoRoutes from './routes/videoRoutes.js';
 import ttsRoutes from './routes/ttsRoutes.js';
 import llmRoutes from './routes/llmRoutes.js';
 import imageRoutes from './routes/imageRoutes.js';
+import settingsRoutes from './routes/settingsRoutes.js';
+import uploadRoutes from './routes/uploadRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 import path from 'path';
@@ -42,6 +44,12 @@ app.use('/api/video', videoRoutes);
 app.use('/api/tts', ttsRoutes);
 app.use('/api/llm', llmRoutes);
 app.use('/api/image', imageRoutes);
+app.use('/api/settings', settingsRoutes);
+app.use('/api/upload', uploadRoutes);
+
+// Static files
+app.use('/uploads', express.static(path.resolve(__dirname, '../public/uploads')));
+
 
 // Health check
 app.get('/health', (req, res) => {
